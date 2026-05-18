@@ -198,9 +198,18 @@ func (s *Sim) Tick(inputs []PlayerInput) ([]Event, error) {
 	// Step 1: serverTick++.
 	s.serverTick++
 
-	// Step 2: build per-player input map.
+	// Step 2: build per-player input map. Sanitize Dir/FireDir to the
+	// 0..8 range; out-of-range values become DirIdle so the wire
+	// invariant (Entity.facing ∈ {1..8}) cannot be corrupted by a
+	// malformed client message.
 	inputMap := make(map[EntityID]PlayerInput, len(inputs))
 	for _, inp := range inputs {
+		if inp.Dir > DirNW {
+			inp.Dir = DirIdle
+		}
+		if inp.FireDir > DirNW {
+			inp.FireDir = DirIdle
+		}
 		inputMap[inp.PlayerID] = inp
 	}
 

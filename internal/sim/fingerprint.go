@@ -2,8 +2,21 @@ package sim
 
 import (
 	"crypto/sha256"
-	"encoding/binary"
 )
+
+// putLE16/32 write little-endian scalars without importing
+// encoding/binary, which §4 forbids inside internal/sim.
+func putLE16(b []byte, v uint16) {
+	b[0] = byte(v)
+	b[1] = byte(v >> 8)
+}
+
+func putLE32(b []byte, v uint32) {
+	b[0] = byte(v)
+	b[1] = byte(v >> 8)
+	b[2] = byte(v >> 16)
+	b[3] = byte(v >> 24)
+}
 
 // Fingerprint returns the 32-byte SHA-256 oracle defined in §12.1.
 func (s *Sim) Fingerprint() [32]byte {
@@ -11,17 +24,17 @@ func (s *Sim) Fingerprint() [32]byte {
 	var buf [16]byte
 
 	// 1. serverTick (u32).
-	binary.LittleEndian.PutUint32(buf[:4], s.serverTick)
+	putLE32(buf[:4], s.serverTick)
 	h.Write(buf[:4])
 
 	// 2. Config.Seed (u32).
-	binary.LittleEndian.PutUint32(buf[:4], s.cfg.Seed)
+	putLE32(buf[:4], s.cfg.Seed)
 	h.Write(buf[:4])
 
 	// 3. Width (u16), Height (u16).
-	binary.LittleEndian.PutUint16(buf[:2], uint16(s.cfg.Width))
+	putLE16(buf[:2], uint16(s.cfg.Width))
 	h.Write(buf[:2])
-	binary.LittleEndian.PutUint16(buf[:2], uint16(s.cfg.Height))
+	putLE16(buf[:2], uint16(s.cfg.Height))
 	h.Write(buf[:2])
 
 	// 4. NoRespawn (u8).
@@ -33,7 +46,7 @@ func (s *Sim) Fingerprint() [32]byte {
 	h.Write(buf[:1])
 
 	// 5. nextID (u32) then quiesced (u8).
-	binary.LittleEndian.PutUint32(buf[:4], uint32(s.store.nextID))
+	putLE32(buf[:4], uint32(s.store.nextID))
 	h.Write(buf[:4])
 	if s.quiesced {
 		buf[0] = 1
@@ -47,7 +60,7 @@ func (s *Sim) Fingerprint() [32]byte {
 	for _, id := range ids {
 		idx := s.store.findByID(id)
 		e := &s.store.slots[idx]
-		binary.LittleEndian.PutUint32(buf[:4], uint32(e.ID))
+		putLE32(buf[:4], uint32(e.ID))
 		h.Write(buf[:4])
 		buf[0] = uint8(e.Kind)
 		h.Write(buf[:1])
@@ -57,13 +70,13 @@ func (s *Sim) Fingerprint() [32]byte {
 		h.Write(buf[:1])
 		buf[0] = e.Flags
 		h.Write(buf[:1])
-		binary.LittleEndian.PutUint32(buf[:4], uint32(e.X))
+		putLE32(buf[:4], uint32(e.X))
 		h.Write(buf[:4])
-		binary.LittleEndian.PutUint32(buf[:4], uint32(e.Y))
+		putLE32(buf[:4], uint32(e.Y))
 		h.Write(buf[:4])
-		binary.LittleEndian.PutUint16(buf[:2], uint16(e.VX))
+		putLE16(buf[:2], uint16(e.VX))
 		h.Write(buf[:2])
-		binary.LittleEndian.PutUint16(buf[:2], uint16(e.VY))
+		putLE16(buf[:2], uint16(e.VY))
 		h.Write(buf[:2])
 
 		// Unexported per-entity state.
@@ -73,32 +86,32 @@ func (s *Sim) Fingerprint() [32]byte {
 			h.Write(buf[:1])
 			buf[0] = uint8(ps.lastDir)
 			h.Write(buf[:1])
-			binary.LittleEndian.PutUint16(buf[:2], ps.lastInputTick)
+			putLE16(buf[:2], ps.lastInputTick)
 			h.Write(buf[:2])
 			// respawnAt (u32). 0 if hasRespawnAt == false.
 			var ra uint32
 			if ps.hasRespawnAt {
 				ra = ps.respawnAt
 			}
-			binary.LittleEndian.PutUint32(buf[:4], ra)
+			putLE32(buf[:4], ra)
 			h.Write(buf[:4])
-			binary.LittleEndian.PutUint32(buf[:4], uint32(ps.deathX))
+			putLE32(buf[:4], uint32(ps.deathX))
 			h.Write(buf[:4])
-			binary.LittleEndian.PutUint32(buf[:4], uint32(ps.deathY))
+			putLE32(buf[:4], uint32(ps.deathY))
 			h.Write(buf[:4])
 			// projLifetime, projShooterID = 0 (not applicable).
-			binary.LittleEndian.PutUint16(buf[:2], 0)
+			putLE16(buf[:2], 0)
 			h.Write(buf[:2])
-			binary.LittleEndian.PutUint32(buf[:4], 0)
+			putLE32(buf[:4], 0)
 			h.Write(buf[:4])
 		} else if e.Kind == KindProjectile {
 			// fireCooldown, lastDir, lastInputTick, respawnAt, deathX,
 			// deathY = 0.
 			h.Write(make([]byte, 1+1+2+4+4+4))
 			pst := s.store.projectiles[id]
-			binary.LittleEndian.PutUint16(buf[:2], pst.lifetime)
+			putLE16(buf[:2], pst.lifetime)
 			h.Write(buf[:2])
-			binary.LittleEndian.PutUint32(buf[:4], uint32(pst.shooterID))
+			putLE32(buf[:4], uint32(pst.shooterID))
 			h.Write(buf[:4])
 		} else {
 			// Generator: all unexported are zero.

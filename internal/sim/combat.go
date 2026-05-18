@@ -22,12 +22,13 @@ type projHit struct {
 // (already filtered by caller to exclude the shooter, the projectile
 // itself, other projectiles, and dead entities). Returns the outcome.
 //
-// AIDEV-NOTE: the wall sweep here reuses moveAndSlide for the *end*
-// position; the entry-time fraction we compare against entity hits is
-// approximated as ((clamped_pos - origin) / velocity) on whichever
-// axis got clamped. Per-tick motion is ≤ 32 subtiles and the dominant
-// axis ordering is X-then-Y; this is sufficient for the §10.2 "earliest
-// impact wins, wall preferred on tie" rule within ±1 subtile.
+// AIDEV-NOTE: wall *end position* comes from moveAndSlide (axis-
+// separated; correct under the §9.3 contract). The wall *time
+// fraction* we compare against entity-hit fractions is approximated
+// from the clamped-axis displacement — exact would require duplicating
+// the full axis-separated sweep with fraction tracking, but the
+// approximation is within 1 subtile and the §10.2 "wall preferred on
+// tie" rule still applies via the ≤ comparison below.
 func resolveProjectile(m *maze, proj *Entity, shooterID EntityID, candidates []*Entity) projHit {
 	x0, y0 := proj.X, proj.Y
 	vx, vy := int32(proj.VX), int32(proj.VY)
