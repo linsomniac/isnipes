@@ -7,15 +7,21 @@ import (
 	"github.com/jafo/isnipes/internal/sim"
 )
 
-// buildSnapshotFor builds the Phase 2 Snapshot for one recipient.
-// Per §6.3.3, entities are emitted in ascending EntityID order; Phase 2
-// has no AOI filtering, so every entity goes out.
+// buildSnapshotFor builds the per-recipient Snapshot. If the recipient
+// is in dead-cam (Phase 5 §8) it delegates to buildDeadCamSnapshotFor.
+// Otherwise it emits the slab in ascending EntityID order (Phase 2
+// behaviour; full AOI priority is Phase 5 §11, which lives in aoi.go
+// once that file lands).
 func (m *Match) buildSnapshotFor(recipient sim.EntityID) proto.Snapshot {
+	if slot, ok := m.slots[recipient]; ok && slot.DeadCam {
+		return m.buildDeadCamSnapshotFor(recipient)
+	}
 	entities := m.sim.Entities()
 	wire := make([]proto.Entity, 0, len(entities))
 	for _, e := range entities {
-		// Sanitise flag bits to Phase 2's allowed set.
-		flags := e.Flags & (sim.FlagDead | sim.FlagTurbo)
+		// Phase 5: allow FlagSpawnInvuln through (§4.3.2 bit 1) so the
+		// client can render the invuln cue.
+		flags := e.Flags & (sim.FlagDead | sim.FlagSpawnInvuln | sim.FlagTurbo)
 		wire = append(wire, proto.Entity{
 			ID:     uint32(e.ID),
 			Kind:   uint8(e.Kind),
@@ -50,6 +56,74 @@ func (m *Match) buildSnapshotFor(recipient sim.EntityID) proto.Snapshot {
 		ServerTick:        m.sim.ServerTick(),
 		YourLastInputTick: m.sim.LastInputTick(recipient),
 		YourEntityID:      yourID,
+		Entities:          wire,
+	}
+}
+
+// buildDeadCamSnapshotFor emits the §11.6 unfiltered dead-cam snapshot:
+// every live entity, truncated at the 64-entity cap by ascending
+// Chebyshev distance from the map centre, ID-ascending tiebreak.
+// `your_entity_id` is always 0 (the player's body has been GC'd).
+func (m *Match) buildDeadCamSnapshotFor(recipient sim.EntityID) proto.Snapshot {
+	entities := m.sim.Entities()
+	cx := int32(m.sim.Width()) * 256 / 2
+	cy := int32(m.sim.Height()) * 256 / 2
+
+	type ranked struct {
+		ent  sim.Entity
+		dist int32
+	}
+	cands := make([]ranked, 0, len(entities))
+	for _, e := range entities {
+		if e.Flags&sim.FlagDead != 0 {
+			continue
+		}
+		dx := e.X - cx
+		if dx < 0 {
+			dx = -dx
+		}
+		dy := e.Y - cy
+		if dy < 0 {
+			dy = -dy
+		}
+		d := dx
+		if dy > d {
+			d = dy
+		}
+		// Convert to tiles so the comparison is in the same units as
+		// §5.3.1's AOI bands (cheap; we keep subtile-units for the
+		// comparator, but tile-rounding doesn't change ordering).
+		cands = append(cands, ranked{ent: e, dist: d})
+	}
+	sort.Slice(cands, func(i, j int) bool {
+		if cands[i].dist != cands[j].dist {
+			return cands[i].dist < cands[j].dist
+		}
+		return cands[i].ent.ID < cands[j].ent.ID
+	})
+	if len(cands) > proto.MaxEntitiesPerSnapshot {
+		cands = cands[:proto.MaxEntitiesPerSnapshot]
+	}
+	wire := make([]proto.Entity, 0, len(cands))
+	for _, c := range cands {
+		e := c.ent
+		flags := e.Flags & (sim.FlagDead | sim.FlagSpawnInvuln | sim.FlagTurbo)
+		wire = append(wire, proto.Entity{
+			ID:     uint32(e.ID),
+			Kind:   uint8(e.Kind),
+			HP:     e.HP,
+			Facing: uint8(e.Facing),
+			Flags:  flags,
+			X:      e.X,
+			Y:      e.Y,
+			VX:     e.VX,
+			VY:     e.VY,
+		})
+	}
+	return proto.Snapshot{
+		ServerTick:        m.sim.ServerTick(),
+		YourLastInputTick: m.sim.LastInputTick(recipient),
+		YourEntityID:      0,
 		Entities:          wire,
 	}
 }

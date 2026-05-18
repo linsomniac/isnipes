@@ -244,9 +244,17 @@ func TestSnapshotEncodeRejectsDuplicateIDs(t *testing.T) {
 }
 
 func TestSnapshotEncodeRejectsDisallowedFlagBits(t *testing.T) {
-	snap := Snapshot{Entities: []Entity{{ID: 1, Flags: FlagSpawnInvuln}}}
+	// Phase 5: FlagSpawnInvuln (bit 1) is now permitted on the wire
+	// per §4.3.2; reserved bits 3-7 remain rejected.
+	reserved := uint8(1 << 3)
+	snap := Snapshot{Entities: []Entity{{ID: 1, Flags: reserved}}}
 	if _, err := snap.Encode(nil); !errors.Is(err, ErrMalformed) {
-		t.Fatalf("err = %v, want ErrMalformed for SpawnInvuln in Phase 2", err)
+		t.Fatalf("err = %v, want ErrMalformed for reserved bit 3", err)
+	}
+	// FlagSpawnInvuln by itself encodes cleanly.
+	ok := Snapshot{Entities: []Entity{{ID: 1, Flags: FlagSpawnInvuln}}}
+	if _, err := ok.Encode(nil); err != nil {
+		t.Fatalf("FlagSpawnInvuln should encode in Phase 5; got %v", err)
 	}
 }
 

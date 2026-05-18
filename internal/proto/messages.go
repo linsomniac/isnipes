@@ -81,15 +81,16 @@ type Snapshot struct {
 
 const snapshotPrefixLen = 4 + 2 + 4 + 1 // = 11
 
-// allowedSnapshotFlagBits enumerates the only Flag bits a Phase 2
-// server may emit on a Snapshot entity (§6.3.3 invariant).
-const allowedSnapshotFlagBits = FlagDead | FlagTurbo
+// allowedSnapshotFlagBits enumerates the Flag bits a server may emit
+// on a Snapshot entity. Per SPEC §4.3.2's wire row: bit 0 = DEAD,
+// bit 1 = SPAWN_INVULN (Phase 5), bit 2 = TURBO; bits 3–7 are reserved.
+const allowedSnapshotFlagBits = FlagDead | FlagSpawnInvuln | FlagTurbo
 
 func (m Snapshot) Encode(dst []byte) ([]byte, error) {
 	if len(m.Entities) > MaxEntitiesPerSnapshot {
 		return nil, ErrMalformed
 	}
-	// §6.3.3 invariants: ascending EntityID, only {FlagDead, FlagTurbo}.
+	// §6.3.3 invariants: ascending EntityID, only DEAD|SPAWN_INVULN|TURBO.
 	for i, e := range m.Entities {
 		if i > 0 && e.ID <= m.Entities[i-1].ID {
 			return nil, ErrMalformed

@@ -59,6 +59,11 @@ type Slot struct {
 	out       chan<- OutboundFrame
 	closeOnce sync.Once
 	closed    chan struct{}
+
+	// Phase 5 §8 — set when the player has been eliminated (lives = 0)
+	// and the slot now serves a dead-cam stream: unfiltered snapshots
+	// with your_entity_id=0 and only Chat input accepted.
+	DeadCam bool
 }
 
 // OutboundFrame is what the match actor pushes to a WS writer.
@@ -298,7 +303,13 @@ func (m *Match) handleControl(msg controlMsg) {
 		if m.state() != StateLive {
 			return // silently drop pre-live inputs
 		}
-		if _, ok := m.slots[v.PlayerID]; !ok {
+		slot, ok := m.slots[v.PlayerID]
+		if !ok {
+			return
+		}
+		// Phase 5 §8.3: dead-cam slots accept Chat only; Input frames
+		// are filtered server-side. Silent drop.
+		if slot.DeadCam {
 			return
 		}
 		// Latest input for this player wins (§9.2).
@@ -509,6 +520,18 @@ func (m *Match) tick() {
 		}
 		m.lastTickEvents = append(m.lastTickEvents, ev)
 		m.broadcastEvent(ev)
+	}
+
+	// Phase 5 §8.2: transition newly-eliminated slots into dead-cam.
+	// One pass per tick — the actor reads Sim.Eliminated which is a
+	// one-way flag, so the transition is idempotent.
+	for pid, slot := range m.slots {
+		if !slot.Joined || slot.DeadCam {
+			continue
+		}
+		if m.sim.Eliminated(pid) {
+			slot.DeadCam = true
+		}
 	}
 
 	// Broadcast snapshot every snapshotEveryTicks.
