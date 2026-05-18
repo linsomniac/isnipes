@@ -21,6 +21,9 @@ const (
 
 	matchWarmupTimeout = 10 * time.Second
 	idleFirstFrame     = 5 * time.Second
+
+	// Phase 5 §3.8.1: 10-minute hard timer.
+	MatchTimerTicks uint32 = 30 * 60 * 10
 )
 
 // Ticker is an injectable abstraction for unit tests. Production uses
@@ -519,11 +522,31 @@ func (m *Match) tick() {
 	}
 }
 
-// evaluateMatchEnd returns (reason, winner, done) per §9.3 + Phase 3
-// §14 (PVE_COMPLETE first in priority).
+// evaluateMatchEnd returns (reason, winner, done) per §3.8.1.
+//
+// Phase 5: the "live player" count is derived from Sim.Scores() (the
+// !Eliminated set) rather than slab-FlagDead, so a player whose lives
+// reached 0 — and whose slab entry was GC'd — counts as eliminated
+// even after the GC pass. Precedence: PVE_COMPLETE > LAST_STANDING >
+// ALL_ELIMINATED > TIMER > SERVER_ERROR (the last is set by panic
+// recovery, not here).
 func (m *Match) evaluateMatchEnd() (uint8, sim.EntityID, bool) {
+	scores := m.sim.Scores()
 	live := 0
 	var lastAlive sim.EntityID
+	for pid := range m.slots {
+		ps, ok := scores[pid]
+		if !ok {
+			continue
+		}
+		if ps.Eliminated {
+			continue
+		}
+		live++
+		if lastAlive == 0 || pid < lastAlive {
+			lastAlive = pid
+		}
+	}
 	startCount := m.joinedAtStart()
 	liveGens := 0
 	liveSnipes := 0
@@ -532,31 +555,61 @@ func (m *Match) evaluateMatchEnd() (uint8, sim.EntityID, bool) {
 			continue
 		}
 		switch ent.Kind {
-		case sim.KindPlayer:
-			live++
-			lastAlive = ent.ID
 		case sim.KindGenerator:
 			liveGens++
 		case sim.KindSnipe:
 			liveSnipes++
 		}
 	}
-	// Phase 3 §14: PVE_COMPLETE wins ties — but only when the match
-	// is a PvE match (level table active). PvP-only matches (Phase 2's
-	// LevelLetter=0 mode) never have generators or snipes by design;
-	// without this guard every PvP match would terminate at tick 1.
+	// Priority 0 — PVE_COMPLETE.
 	if m.isPvE && liveGens == 0 && liveSnipes == 0 && live >= 1 {
-		// SPEC §3.8: in PVE_COMPLETE the winner field is 0 (Phase 5
-		// owns the scoreboard / tie resolution).
 		return proto.EndPVEComplete, 0, true
 	}
-	switch {
-	case live == 1 && startCount >= 2:
+	// Priority 1 — LAST_STANDING.
+	if live == 1 && startCount >= 2 {
 		return proto.EndLastStanding, lastAlive, true
-	case live == 0:
+	}
+	// Priority 2 — ALL_ELIMINATED.
+	if live == 0 {
 		return proto.EndAllEliminated, 0, true
 	}
+	// Priority 3 — TIMER (10 min hard cap).
+	if m.sim.ServerTick() >= MatchTimerTicks {
+		return proto.EndTimer, m.timerWinner(scores), true
+	}
 	return 0, 0, false
+}
+
+// timerWinner returns the player with the strictly-highest score
+// among joined slots, or 0 on tie. Used by the TIMER end-reason per
+// §3.8 "highest score wins; ties allowed (joint winners)".
+func (m *Match) timerWinner(scores map[sim.EntityID]sim.PlayerScore) sim.EntityID {
+	var bestID sim.EntityID
+	var bestScore int32
+	tie := false
+	first := true
+	for pid := range m.slots {
+		ps, ok := scores[pid]
+		if !ok {
+			continue
+		}
+		if first {
+			bestID, bestScore = pid, ps.Score
+			first = false
+			continue
+		}
+		switch {
+		case ps.Score > bestScore:
+			bestID, bestScore = pid, ps.Score
+			tie = false
+		case ps.Score == bestScore:
+			tie = true
+		}
+	}
+	if tie {
+		return 0
+	}
+	return bestID
 }
 
 // joinedAtStart returns the player count when the sim was created.
@@ -595,37 +648,27 @@ func (m *Match) endMatch(reason uint8, winner sim.EntityID) {
 }
 
 func (m *Match) buildMatchOverEntries(winner sim.EntityID, reason uint8) []proto.MatchOverEntry {
-	// Phase 3 §14: under PVE_COMPLETE all *surviving* players have
-	// LivesRemaining=1; under LAST_STANDING only the winner does.
-	// ALL_ELIMINATED leaves all at 0.
-	living := make(map[sim.EntityID]bool)
+	// Phase 5 §13.3: populate Score and LivesRemaining from sim.Scores().
+	// Eliminated players appear with LivesRemaining=0; respawning
+	// players appear with their current count. Entries are sorted by
+	// ascending PlayerID for deterministic wire output (the client
+	// re-sorts by score for display).
+	_ = winner
+	_ = reason
+	var scores map[sim.EntityID]sim.PlayerScore
 	if m.sim != nil {
-		for _, ent := range m.sim.Entities() {
-			if ent.Kind == sim.KindPlayer && ent.Flags&sim.FlagDead == 0 {
-				living[ent.ID] = true
-			}
-		}
+		scores = m.sim.Scores()
 	}
 	entries := make([]proto.MatchOverEntry, 0, len(m.slots))
 	for pid, slot := range m.slots {
 		if !slot.Joined {
 			continue
 		}
-		var lives uint8
-		switch reason {
-		case proto.EndPVEComplete:
-			if living[pid] {
-				lives = 1
-			}
-		case proto.EndLastStanding:
-			if pid == winner {
-				lives = 1
-			}
-		}
+		ps := scores[pid]
 		entries = append(entries, proto.MatchOverEntry{
 			PlayerID:       uint32(pid),
-			Score:          0,
-			LivesRemaining: lives,
+			Score:          ps.Score,
+			LivesRemaining: ps.Lives,
 		})
 	}
 	sortEntries(entries)
@@ -789,28 +832,26 @@ func (m *Match) sendScoreboardTo(slot *Slot) {
 }
 
 func (m *Match) buildScoreboardEntries() []proto.ScoreboardEntry {
+	// Phase 5 §12.2: populate Lives and Score from sim.Scores().
+	var scores map[sim.EntityID]sim.PlayerScore
+	if m.sim != nil {
+		scores = m.sim.Scores()
+	}
 	entries := make([]proto.ScoreboardEntry, 0, len(m.slots))
 	for pid, slot := range m.slots {
 		if !slot.Joined {
 			continue
 		}
-		// In Phase 2, lives = 1 while alive, 0 after death.
-		lives := uint8(1)
-		idx := m.sim.Entities()
-		for _, e := range idx {
-			if e.ID == pid && e.Flags&sim.FlagDead != 0 {
-				lives = 0
-			}
-		}
 		nick := slot.Nick
 		if nick == "" {
 			nick = fmt.Sprintf("P%d", pid)
 		}
+		ps := scores[pid]
 		entries = append(entries, proto.ScoreboardEntry{
 			PlayerID: uint32(pid),
 			Nick:     nick,
-			Lives:    lives,
-			Score:    0,
+			Lives:    ps.Lives,
+			Score:    ps.Score,
 		})
 	}
 	sortScoreboardEntries(entries)
