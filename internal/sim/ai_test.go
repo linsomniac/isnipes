@@ -31,23 +31,24 @@ func newAIFixtureSim(t *testing.T, px, py int) *Sim {
 func TestSnipeIdleToPatrolAfter15Ticks(t *testing.T) {
 	s := newAIFixtureSim(t, 30, 20)
 	snipeID := SpawnSnipeForTest(s, 0, 10, 10)
-	// Ticks 1..14: should remain IDLE with FlagSpawnInvuln.
-	for i := 0; i < 14; i++ {
+	// Ticks 1..15: should remain IDLE with FlagSpawnInvuln (§7.1
+	// "cleared by AI step on tick 16+").
+	for i := 0; i < 15; i++ {
 		s.Tick(nil)
 	}
 	info, _ := SnipeStateForTest(s, snipeID)
 	if info.AIState != AIStateIdle {
-		t.Fatalf("after 14 ticks: state=%d, want Idle", info.AIState)
+		t.Fatalf("after 15 ticks: state=%d, want Idle", info.AIState)
 	}
 	e, _ := EntityRawForTest(s, snipeID)
 	if e.Flags&FlagSpawnInvuln == 0 {
 		t.Fatalf("FlagSpawnInvuln cleared early")
 	}
-	// Tick 15: should transition to PATROL.
+	// Tick 16: should transition to PATROL.
 	s.Tick(nil)
 	info, _ = SnipeStateForTest(s, snipeID)
 	if info.AIState != AIStatePatrol {
-		t.Fatalf("after 15 ticks: state=%d, want Patrol", info.AIState)
+		t.Fatalf("after 16 ticks: state=%d, want Patrol", info.AIState)
 	}
 	e, _ = EntityRawForTest(s, snipeID)
 	if e.Flags&FlagSpawnInvuln != 0 {
@@ -60,13 +61,12 @@ func TestSnipePatrolToChase(t *testing.T) {
 	// after Easy bucket.
 	s := newAIFixtureSim(t, 12, 10)
 	snipeID := SpawnSnipeForTest(s, 0, 10, 10)
-	// Drain spawn-invuln.
-	for i := 0; i < 16; i++ {
+	// Drain spawn-invuln (16 ticks) then run a few patrol ticks so
+	// the LOS scan engages.
+	for i := 0; i < 20; i++ {
 		s.Tick(nil)
 	}
 	info, _ := SnipeStateForTest(s, snipeID)
-	// After tick 15, state may be PATROL (LOS check happens during
-	// patrol step). After tick 16+, should be CHASE.
 	if info.AIState != AIStateChase && info.AIState != AIStateAttack {
 		t.Fatalf("snipe never entered chase/attack: state=%d", info.AIState)
 	}
@@ -79,7 +79,7 @@ func TestSnipeChaseToPatrolOnLOSLost(t *testing.T) {
 	s := newAIFixtureSim(t, 12, 10)
 	snipeID := SpawnSnipeForTest(s, 0, 10, 10)
 	// Drain spawn-invuln + enter chase.
-	for i := 0; i < 17; i++ {
+	for i := 0; i < 20; i++ {
 		s.Tick(nil)
 	}
 	info, _ := SnipeStateForTest(s, snipeID)
@@ -156,12 +156,14 @@ func TestSnipeSpawnInvulnFiltersProjectile(t *testing.T) {
 	PlacePlayerForTest(s, 1,
 		int32(5*subtilePerTile+subtilePerTile/2),
 		int32(20*subtilePerTile+subtilePerTile/2))
-	snipeID := SpawnSnipeForTest(s, 0, 10, 20)
+	// Place snipe close enough that the projectile reaches it during
+	// the spawn-invuln window (15 ticks).
+	snipeID := SpawnSnipeForTest(s, 0, 7, 20)
 	// Player fires E at the spawn-invuln snipe.
 	_, _ = s.Tick([]PlayerInput{{PlayerID: 1, FireDir: DirE}})
 	// Tick projectile motion until it reaches the snipe.
 	hit := false
-	for i := 0; i < 20; i++ {
+	for i := 0; i < 14; i++ {
 		evs, _ := s.Tick(nil)
 		for _, e := range evs {
 			if e.Kind == EventEntityHit && e.Target == snipeID {

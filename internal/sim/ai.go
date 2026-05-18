@@ -34,7 +34,7 @@ func (s *Sim) stepSnipeAI(snipe *Entity, ss *snipeState) []Event {
 // aiStepIdle keeps velocity at zero and counts down spawn-invuln.
 func (s *Sim) aiStepIdle(snipe *Entity, ss *snipeState) {
 	snipe.VX, snipe.VY = 0, 0
-	if s.serverTick-ss.spawnTick >= uint32(spawnInvulnTicks) {
+	if s.serverTick-ss.spawnTick > uint32(spawnInvulnTicks) {
 		snipe.Flags &^= FlagSpawnInvuln
 		ss.aiState = AIStatePatrol
 		ss.aiTimer = 0

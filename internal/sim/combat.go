@@ -70,6 +70,10 @@ func resolveProjectile(m *maze, proj *Entity, shooterID EntityID, candidates []*
 		if e.Flags&FlagDead != 0 {
 			continue
 		}
+		// Spawn-invuln targets cannot be hit (Phase 3 §12.2).
+		if e.Flags&FlagSpawnInvuln != 0 {
+			continue
+		}
 		eHe := entityHalfExt(e.Kind)
 		ax := e.X - eHe - he
 		bx := e.X + eHe + he
