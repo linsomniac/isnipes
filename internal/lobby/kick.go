@@ -34,7 +34,8 @@ func (l *Lobby) handleKick(s *Session, p proto.LobbyKickPayload) {
 		RoomID: room.ID,
 		Reason: "kicked-by-host",
 	})
-	// Remove from room.
+	// Remove from room. removeFromRoom emits the §11 delta (and the
+	// legacy full roomList broadcast).
 	l.removeFromRoom(target, room)
 	// §7.3: invalidate any join token allocated for this player. Both
 	// the lobby's bookkeeping AND the match actor's bySession admission

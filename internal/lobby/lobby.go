@@ -353,7 +353,12 @@ func (l *Lobby) handleCreateRoom(s *Session, c proto.CreateRoom) {
 	}
 	l.rooms[id] = room
 	s.roomID = id
+	// Phase 6 §11: full roomList for the creator (synchronous reply to
+	// their createRoom), plus a `room_added` delta to every session
+	// (including the creator so the client builds a uniform delta-only
+	// update path post-welcome).
 	l.send(s, proto.LobbyRoomList, l.buildRoomList())
+	l.broadcastRoomDelta(proto.LobbyRoomAdded, room)
 }
 
 func (l *Lobby) handleJoinRoom(s *Session, j proto.JoinRoom) {
@@ -380,8 +385,11 @@ func (l *Lobby) handleJoinRoom(s *Session, j proto.JoinRoom) {
 	}
 	room.Members = append(room.Members, string(s.ID))
 	s.roomID = room.ID
-	// Broadcast updated room list to every session in any state.
+	// Phase 6 §11: room_updated delta carries the new member count.
+	// Keep the full roomList broadcast for now (clients reconcile via
+	// either path); a future iter may drop the full-list broadcast.
 	l.broadcastRoomList()
+	l.broadcastRoomDelta(proto.LobbyRoomUpdated, room)
 }
 
 func (l *Lobby) handleLeaveRoom(s *Session) {
@@ -406,6 +414,7 @@ func (l *Lobby) removeFromRoom(s *Session, room *Room) {
 	}
 	s.roomID = ""
 	// If the host left, close the room. (Phase 2: no host-handoff.)
+	closed := false
 	if room.Host == string(s.ID) || len(room.Members) == 0 {
 		room.State = RoomClosed
 		// Kick the remaining members out of their roomID assignment.
@@ -415,8 +424,15 @@ func (l *Lobby) removeFromRoom(s *Session, room *Room) {
 			}
 		}
 		delete(l.rooms, room.ID)
+		closed = true
 	}
 	l.broadcastRoomList()
+	// Phase 6 §11: delta envelope alongside the legacy full-list.
+	if closed {
+		l.broadcastRoomRemoved(room.ID)
+	} else {
+		l.broadcastRoomDelta(proto.LobbyRoomUpdated, room)
+	}
 }
 
 func (l *Lobby) handleStartMatch(s *Session, sm proto.StartMatch) {
