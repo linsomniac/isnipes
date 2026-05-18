@@ -454,13 +454,19 @@ func (s *Sim) Tick(inputs []PlayerInput) ([]Event, error) {
 			tidx := s.store.findByID(res.targetID)
 			if tidx >= 0 {
 				target := &s.store.slots[tidx]
-				if target.HP > 0 {
+				// Phase 5 codex fix: a lag-comp ghost candidate could
+				// be a slab entry that has already been killed (HP 0,
+				// FlagDead set) and is awaiting respawn. Don't apply
+				// damage/score/lives a second time.
+				if target.Flags&FlagDead == 0 && target.HP > 0 {
 					target.HP--
+					events = append(events, Event{Kind: EventEntityHit, Actor: shooterID, Target: res.targetID, Reason: 0})
+					if target.HP == 0 {
+						events = s.killEntity(events, target, shooterID)
+					}
 				}
-				events = append(events, Event{Kind: EventEntityHit, Actor: shooterID, Target: res.targetID, Reason: 0})
-				if target.HP == 0 {
-					events = s.killEntity(events, target, shooterID)
-				}
+				// Else: ghost hit on an already-dead slab entry —
+				// silently consume the projectile without re-killing.
 			} else {
 				// Phase 4 §8.6: ghost-candidate hit — the target was
 				// alive at T_view but is now removed (or fully dead).
@@ -701,12 +707,14 @@ func (s *Sim) garbageCollect() {
 			s.store.remove(id)
 		case KindPlayer:
 			ps := s.store.players[e.ID]
-			if s.cfg.NoRespawn || (ps != nil && ps.eliminated) {
+			eliminated := ps != nil && ps.eliminated
+			if s.cfg.NoRespawn || eliminated {
 				id := e.ID
-				slabOnlyRemove := ps != nil && ps.eliminated && !s.cfg.NoRespawn
-				if slabOnlyRemove {
+				if eliminated {
 					// Phase 5 §6.5: retain playerState (and history)
-					// for the eliminated record; clear only the slab.
+					// for the eliminated record regardless of NoRespawn,
+					// so Sim.Scores() and the §16.1 fingerprint tail
+					// continue to reflect the final lives/score.
 					idx := s.store.findByID(id)
 					if idx >= 0 {
 						s.store.slots[idx] = Entity{}

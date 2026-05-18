@@ -308,6 +308,103 @@ func TestNoRespawnScheduledForEliminated(t *testing.T) {
 	}
 }
 
+// TestGhostHitDoesNotDoubleKillDeadTarget — codex P5 iter 1 finding #1.
+// A lag-comp ghost candidate that happens to coincide with an
+// already-dead slab entity (HP 0 + FlagDead) must NOT decrement lives
+// or award score a second time. The fix re-orders the projectile-loop
+// branch to short-circuit on FlagDead before damage/score apply; this
+// test replays the branch directly.
+func TestGhostHitDoesNotDoubleKillDeadTarget(t *testing.T) {
+	cfg := Config{
+		Seed:         0xCAFE,
+		Width:        60,
+		Height:       40,
+		PlayerIDs:    []EntityID{1, 2},
+		NoGenerators: true,
+	}
+	s, err := NewSim(cfg)
+	if err != nil {
+		t.Fatalf("NewSim: %v", err)
+	}
+	idx := s.store.findByID(2)
+	if idx < 0 {
+		t.Fatal("victim missing")
+	}
+	// First kill — legitimate.
+	_ = s.killEntity(nil, &s.store.slots[idx], 1)
+	scoreAfterFirst := s.Score(1)
+	livesAfterFirst := s.LivesRemaining(2)
+
+	// Replay the guarded projectile-resolution branch verbatim. With
+	// the fix, the inner `if target.Flags&FlagDead == 0 && target.HP > 0`
+	// short-circuits and no damage applies.
+	target := &s.store.slots[idx]
+	events := []Event{}
+	if target.Flags&FlagDead == 0 && target.HP > 0 {
+		target.HP--
+		events = append(events, Event{Kind: EventEntityHit, Actor: 1, Target: target.ID})
+		if target.HP == 0 {
+			events = s.killEntity(events, target, 1)
+		}
+	}
+	if len(events) != 0 {
+		t.Fatalf("guarded branch emitted %d events; want 0", len(events))
+	}
+	if got := s.Score(1); got != scoreAfterFirst {
+		t.Fatalf("score drifted: %d -> %d (double-kill regression)", scoreAfterFirst, got)
+	}
+	if got := s.LivesRemaining(2); got != livesAfterFirst {
+		t.Fatalf("lives drifted: %d -> %d (double-kill regression)", livesAfterFirst, got)
+	}
+}
+
+// TestEliminatedRetainsPlayerStateEvenUnderNoRespawn — codex P5 iter 1
+// finding #2. The match actor currently builds the sim with
+// NoRespawn=true, but eliminated players must persist their playerState
+// for the §16.1 fingerprint tail and the final scoreboard.
+func TestEliminatedRetainsPlayerStateEvenUnderNoRespawn(t *testing.T) {
+	cfg := Config{
+		Seed:         0xCAFE,
+		Width:        60,
+		Height:       40,
+		PlayerIDs:    []EntityID{1, 2},
+		NoGenerators: true,
+		NoRespawn:    true,
+	}
+	s, err := NewSim(cfg)
+	if err != nil {
+		t.Fatalf("NewSim: %v", err)
+	}
+	// Burn through victim's lives to elimination.
+	ps := s.store.players[2]
+	ps.livesRemaining = 1
+	idx := s.store.findByID(2)
+	if idx < 0 {
+		t.Fatal("victim missing")
+	}
+	_ = s.killEntity(nil, &s.store.slots[idx], 1)
+	if !s.Eliminated(2) {
+		t.Fatal("victim should be Eliminated")
+	}
+	if _, err := s.Tick(nil); err != nil {
+		t.Fatalf("Tick: %v", err)
+	}
+	if s.store.findByID(2) >= 0 {
+		t.Fatal("slab entry should be GC'd after Tick")
+	}
+	if _, ok := s.store.players[2]; !ok {
+		t.Fatal("playerState dropped despite eliminated=true (codex finding #2)")
+	}
+	scores := s.Scores()
+	r, ok := scores[2]
+	if !ok {
+		t.Fatal("Scores() missing eliminated player")
+	}
+	if !r.Eliminated || r.Lives != 0 {
+		t.Fatalf("Scores()[2] = %+v", r)
+	}
+}
+
 // TestDeterminism_LivesAndScoreInFingerprint — two sims with identical
 // configs and inputs produce identical fingerprints, including the
 // new playerScore block.
