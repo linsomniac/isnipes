@@ -1,3 +1,5 @@
+//go:build testhooks
+
 package match
 
 import (
@@ -161,18 +163,37 @@ func TestEndReason_TimerTieReturnsZeroWinner(t *testing.T) {
 	}
 }
 
-// TestEndReason_PvECompleteWinsAllElimTie — PvE objective complete on
-// the same tick the last 2 players die together: PVE_COMPLETE wins
-// only if at least one survivor exists. With both dead and gens gone,
-// the eval returns ALL_ELIMINATED (the §3.8.1 example "last two players
-// kill each other and snipes remain → ALL_ELIMINATED").
-func TestEndReason_PvEEdgeCase(t *testing.T) {
-	m := newPvEMatchForEval(t)
-	sim.RemoveAllGeneratorsForTest(m.sim)
-	sim.RemoveAllSnipesForTest(m.sim)
-	// With both players alive, gens=0, snipes=0, isPvE: PVE_COMPLETE.
-	reason, _, done := m.evaluateMatchEnd()
-	if !done || reason != proto.EndPVEComplete {
-		t.Fatalf("got (reason=%d done=%v), want EndPVEComplete", reason, done)
-	}
+// TestEndReason_PvECompleteRequiresSurvivor — §3.8.1: PVE_COMPLETE
+// requires ≥ 1 player with ≥ 1 life. With objective met AND both
+// players eliminated, ALL_ELIMINATED wins over PVE_COMPLETE.
+func TestEndReason_PvECompleteRequiresSurvivor(t *testing.T) {
+	t.Run("ObjectiveClearWithSurvivors_PvE", func(t *testing.T) {
+		m := newPvEMatchForEval(t)
+		sim.RemoveAllGeneratorsForTest(m.sim)
+		sim.RemoveAllSnipesForTest(m.sim)
+		reason, _, done := m.evaluateMatchEnd()
+		if !done || reason != proto.EndPVEComplete {
+			t.Fatalf("got (reason=%d done=%v), want EndPVEComplete", reason, done)
+		}
+	})
+	t.Run("ObjectiveClearAllDead_AllElim", func(t *testing.T) {
+		m := newPvEMatchForEval(t)
+		sim.RemoveAllGeneratorsForTest(m.sim)
+		sim.RemoveAllSnipesForTest(m.sim)
+		// Eliminate both players. §3.8.1 example: "last two players
+		// kill each other and snipes remain → ALL_ELIMINATED";
+		// generalised here to no snipes either.
+		killPlayerUntilEliminated(t, m, 1, 0)
+		killPlayerUntilEliminated(t, m, 2, 0)
+		reason, winner, done := m.evaluateMatchEnd()
+		if !done {
+			t.Fatal("eval not done")
+		}
+		if reason != proto.EndAllEliminated {
+			t.Fatalf("reason=%d, want EndAllEliminated (no survivors → not PVE_COMPLETE)", reason)
+		}
+		if winner != 0 {
+			t.Fatalf("winner=%d, want 0", winner)
+		}
+	})
 }

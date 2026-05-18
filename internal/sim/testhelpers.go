@@ -1,10 +1,13 @@
+//go:build testhooks
+
 package sim
 
 // This file collects test-only helpers exported from internal/sim so
 // cross-package tests (internal/match, internal/net) can drive the
 // sim into specific states without re-deriving the work. They are
-// EXPORTED but suffixed `*ForTest` to keep grep-discoverability.
-// Production code MUST NOT call them.
+// fenced behind `//go:build testhooks` so production binaries never
+// link them — any test that uses these must be built with
+// `-tags=testhooks` (see CI workflow / Makefile).
 
 // SetLivesForTest overrides a player's livesRemaining counter.
 func SetLivesForTest(s *Sim, id EntityID, n uint8) {
