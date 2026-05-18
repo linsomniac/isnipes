@@ -190,6 +190,52 @@ func TestMatchJoinRejectsUnknownToken(t *testing.T) {
 	}
 }
 
+func TestMatchJoinRejectsLateJoin(t *testing.T) {
+	// 3-slot match: 2 join immediately, transitioning to LIVE; the
+	// third (still-valid token) is then rejected.
+	ft := newFakeTicker()
+	fc := &fakeClock{now: time.Unix(0, 0)}
+	cfg := MatchConfig{
+		MatchID:  "M1",
+		MapSeed:  1,
+		MapWidth: 60, MapHeight: 40,
+		PlayerSlots: []PendingJoin{
+			{MatchID: "M1", Token: "tokA", PlayerID: 1, Nick: "A"},
+			{MatchID: "M1", Token: "tokB", PlayerID: 2, Nick: "B"},
+			{MatchID: "M1", Token: "tokC", PlayerID: 3, Nick: "C"},
+		},
+		Ticker: ft, Clock: fc.Now,
+	}
+	m, err := NewMatch(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	go m.Run()
+	defer m.Abort("test")
+	outA := make(chan OutboundFrame, 64)
+	outB := make(chan OutboundFrame, 64)
+	outC := make(chan OutboundFrame, 64)
+	_, _ = m.SubmitJoin("tokA", outA)
+	_, _ = m.SubmitJoin("tokB", outB)
+	// Advance warmup timeout to force StateLive even with 2 of 3.
+	fc.Advance(matchWarmupTimeout + time.Second)
+	ft.Send(fc.Now())
+	// Wait for state transition.
+	for i := 0; i < 50; i++ {
+		if m.State() == StateLive {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if m.State() != StateLive {
+		t.Fatalf("expected StateLive, got %v", m.State())
+	}
+	// Late join must be rejected.
+	if _, err := m.SubmitJoin("tokC", outC); err == nil {
+		t.Fatalf("late join was accepted")
+	}
+}
+
 func TestMatchJoinRejectsReusedToken(t *testing.T) {
 	m, _, _, outA, outB := twoPlayerSetup(t)
 	go m.Run()

@@ -279,6 +279,11 @@ func (m *Match) handleControl(msg controlMsg) {
 
 // handleJoin processes a MatchJoin. Reply is sent via v.Reply.
 func (m *Match) handleJoin(v ctlJoin) {
+	// Phase 2 does not support late join (§9.3 / §1 "no late-join").
+	if m.state() == StateLive || m.state() == StateEnded {
+		v.Reply <- joinResult{Err: ErrAuth}
+		return
+	}
 	pid, ok := m.bySession[v.Token]
 	if !ok {
 		v.Reply <- joinResult{Err: ErrAuth}
@@ -316,7 +321,11 @@ func (m *Match) handleJoin(v ctlJoin) {
 	}
 
 	// Reply *after* state transition so the caller observes the
-	// post-transition state via Match.State().
+	// post-transition state via Match.State(). The post-transition
+	// path above always reaches StateLive (or aborts to StateEnded
+	// via the < 2 check inside startOrAbort, in which case the
+	// reply still goes out — callers are expected to treat ErrAuth
+	// on close as a transient close, not as a join failure).
 	v.Reply <- joinResult{PlayerID: pid}
 }
 
@@ -496,6 +505,7 @@ func (m *Match) endMatch(reason uint8, winner sim.EntityID) {
 		m.sendFrameTo(slot, proto.MsgMatchOver, mo)
 		m.closeSlot(slot)
 	}
+	m.drainInboxAfterEnd()
 }
 
 func (m *Match) buildMatchOverEntries(winner sim.EntityID) []proto.MatchOverEntry {
@@ -526,7 +536,12 @@ func (m *Match) abort(reason string) {
 	m.setState(StateEnded)
 	m.endedAt = m.clock()
 	if m.sim != nil {
-		// Best-effort MatchOver.
+		// Best-effort MatchOver. One match_end broadcast, then one
+		// MatchOver per slot.
+		m.broadcastEvent(proto.Event{
+			Kind:   uint8(proto.EventMatchEnd),
+			Reason: proto.EndServerError,
+		})
 		mo := proto.MatchOver{
 			FinalTick: m.sim.ServerTick(),
 			Reason:    proto.EndServerError,
@@ -535,10 +550,6 @@ func (m *Match) abort(reason string) {
 			if !slot.Joined {
 				continue
 			}
-			m.broadcastEvent(proto.Event{
-				Kind:   uint8(proto.EventMatchEnd),
-				Reason: proto.EndServerError,
-			})
 			m.sendFrameTo(slot, proto.MsgMatchOver, mo)
 			m.closeSlot(slot)
 		}
@@ -550,6 +561,9 @@ func (m *Match) abort(reason string) {
 			}
 		}
 	}
+	// Drain any pending inbox messages so SubmitJoin callers don't
+	// block forever waiting for a reply.
+	m.drainInboxAfterEnd()
 	_ = reason // logged at the caller layer
 }
 
@@ -594,6 +608,32 @@ func (m *Match) Abort(reason string) {
 		// Inbox full — best effort.
 	}
 }
+
+// drainInboxAfterEnd best-effort drains any control messages still in
+// the inbox after the match ENDs. ctlJoin senders are blocked on
+// Reply; we send ErrAuth so they unblock.
+//
+// We drain non-blockingly so this never stalls the actor; a producer
+// that *races* with this drain — i.e. enqueues a ctlJoin after we
+// returned — will block forever. That race is unobservable in Phase 2
+// because callers serialise through the lobby and registry handoff,
+// but Phase 5's reconnect work will need a stronger contract.
+func (m *Match) drainInboxAfterEnd() {
+	for {
+		select {
+		case msg := <-m.in:
+			if j, ok := msg.(ctlJoin); ok {
+				j.Reply <- joinResult{Err: ErrAuth}
+			}
+		default:
+			return
+		}
+	}
+}
+
+// endMatch's tail also needs to drain so a join that landed just
+// before the natural end transition doesn't block. Handled by the
+// same drainInboxAfterEnd call below.
 
 // sendFrameTo encodes msg and pushes it to the slot's out channel.
 // Drops the slot if the channel is full (PHASE2.md §10.2 backpressure
