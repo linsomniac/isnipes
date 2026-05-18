@@ -55,6 +55,27 @@ func TestOWT_TicksClamped(t *testing.T) {
 	}
 }
 
+// TestOWT_RTTSampleClamped: an adversarial RTT (e.g. uint32 max from
+// a forged client timestamp) does not overflow the EWMA math.
+func TestOWT_RTTSampleClamped(t *testing.T) {
+	o := NewOWTEstimator()
+	o.ObservePong(1 << 31) // larger than maxObservedRTTMs
+	// Should clamp internally and converge to a sane value.
+	if got := o.OWTMs(); got > maxObservedRTTMs {
+		t.Fatalf("OWTMs=%d unclamped (> %d)", got, maxObservedRTTMs)
+	}
+	if got := o.OWTTicks(); got != sim.LagCompTicks {
+		t.Fatalf("OWTTicks=%d, want clamp=%d", got, sim.LagCompTicks)
+	}
+	// Hammer with adversarial samples; smoothed value stays bounded.
+	for i := 0; i < 100; i++ {
+		o.ObservePong(0xFFFFFFFF)
+	}
+	if got := o.OWTMs(); got > maxObservedRTTMs {
+		t.Fatalf("after hammer: OWTMs=%d unclamped", got)
+	}
+}
+
 func TestOWT_ZeroBeforeFirstPong(t *testing.T) {
 	o := NewOWTEstimator()
 	if got := o.OWTTicks(); got != 0 {

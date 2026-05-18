@@ -5,7 +5,7 @@ import "testing"
 func TestHistory_RingWriteWraps(t *testing.T) {
 	var h entityHistory
 	for i := uint32(100); i < 112; i++ {
-		h.write(i, int32(i), int32(i*2), uint8(i&0xff))
+		h.write(i, int32(i), int32(i*2), KindPlayer, uint8(i&0xff))
 	}
 	if h.count != HistoryDepth {
 		t.Fatalf("count=%d want %d", h.count, HistoryDepth)
@@ -24,7 +24,7 @@ func TestHistory_RingWriteWraps(t *testing.T) {
 func TestHistory_At_PresentTick(t *testing.T) {
 	var h entityHistory
 	for i := uint32(100); i <= 108; i++ {
-		h.write(i, int32(i*10), int32(i*100), 0)
+		h.write(i, int32(i*10), int32(i*100), KindPlayer, 0)
 	}
 	for _, want := range []uint32{100, 104, 108} {
 		s, ok := h.at(want)
@@ -40,7 +40,7 @@ func TestHistory_At_PresentTick(t *testing.T) {
 func TestHistory_At_ClampsToOldest(t *testing.T) {
 	var h entityHistory
 	for i := uint32(100); i <= 108; i++ {
-		h.write(i, int32(i), 0, 0)
+		h.write(i, int32(i), 0, KindPlayer, 0)
 	}
 	s, ok := h.at(50) // far older than oldest (=100)
 	if !ok {
@@ -60,7 +60,7 @@ func TestHistory_At_EmptyReturnsFalse(t *testing.T) {
 
 func TestHistory_DeadFlagPropagates(t *testing.T) {
 	var h entityHistory
-	h.write(10, 1, 2, FlagDead|FlagSpawnInvuln)
+	h.write(10, 1, 2, KindPlayer, FlagDead|FlagSpawnInvuln)
 	s, ok := h.at(10)
 	if !ok {
 		t.Fatal("at: ok=false")
@@ -73,7 +73,7 @@ func TestHistory_DeadFlagPropagates(t *testing.T) {
 func TestHistory_Reset(t *testing.T) {
 	var h entityHistory
 	for i := uint32(1); i <= 5; i++ {
-		h.write(i, 0, 0, 0)
+		h.write(i, 0, 0, KindPlayer, 0)
 	}
 	h.reset()
 	if h.count != 0 || h.head != 0 {

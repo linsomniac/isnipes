@@ -23,7 +23,12 @@ type projHit struct {
 type lagCompContext struct {
 	currentTick uint32
 	owtTicks    uint8
-	getHist     func(EntityID) *entityHistory
+	// getHist returns the history ring for one entity ID, or nil.
+	getHist func(EntityID) *entityHistory
+	// getAllHistories returns the full per-entity history map for
+	// the §8.6 ghost-candidate pass. May be nil — in which case the
+	// ghost pass is a no-op (PHASE4.md §8.6 edge case).
+	getAllHistories func() map[EntityID]*entityHistory
 }
 
 func (lc lagCompContext) enabled(shooterKind EntityKind) bool {
@@ -95,6 +100,12 @@ func resolveProjectile(m *maze, proj *Entity, shooterID EntityID, shooterKind En
 	if useLagComp {
 		tView = lc.tView()
 	}
+	// Pre-collect candidate IDs so lag-comp's ghost pass (§8.6) can
+	// skip entities already present in the live candidate list.
+	live := make(map[EntityID]struct{}, len(candidates))
+	for _, e := range candidates {
+		live[e.ID] = struct{}{}
+	}
 	for _, e := range candidates {
 		if e.ID == 0 || e.ID == proj.ID || e.ID == shooterID {
 			continue
@@ -143,6 +154,17 @@ func resolveProjectile(m *maze, proj *Entity, shooterID EntityID, shooterKind En
 		}
 	}
 
+	// Phase 4 §8.6: lag-comp ghost candidates — entities that are no
+	// longer live (FlagDead in slab, or removed entirely) but whose
+	// history sample at T_view is alive. The "shot around a corner"
+	// case. Skipped for snipe shooters (gate) and for OWTTicks == 0.
+	if useLagComp {
+		bestNum, bestDen, bestID, bestSet = lagCompGhostPass(
+			x0, y0, vx, vy, he, shooterID, tView, live, lc,
+			bestNum, bestDen, bestID, bestSet,
+		)
+	}
+
 	if !wallHit && !bestSet {
 		return projHit{kind: projHitNone, endX: x0 + vx, endY: y0 + vy}
 	}
@@ -161,6 +183,71 @@ func resolveProjectile(m *maze, proj *Entity, shooterID EntityID, shooterKind En
 	ex := x0 + int32(int64(vx)*bestNum/bestDen)
 	ey := y0 + int32(int64(vy)*bestNum/bestDen)
 	return projHit{kind: projHitEntity, targetID: bestID, endX: ex, endY: ey}
+}
+
+// lagCompGhostPass tests projectile sweep against entities that are
+// not in the live candidate list but whose history sample at T_view
+// was alive (FlagDead/SpawnInvuln clear). Implements PHASE4.md §8.6
+// "shot around a corner" semantics.
+func lagCompGhostPass(
+	x0, y0, vx, vy, he int32,
+	shooterID EntityID,
+	tView uint32,
+	live map[EntityID]struct{},
+	lc lagCompContext,
+	bestNum, bestDen int64,
+	bestID EntityID,
+	bestSet bool,
+) (int64, int64, EntityID, bool) {
+	// Enumerate history-only IDs (live entities are tested in the
+	// main loop). `live` is the SKIP set.
+	for id, h := range lcAllHistories(lc) {
+		if id == shooterID {
+			continue
+		}
+		if _, isLive := live[id]; isLive {
+			continue
+		}
+		s, ok := h.at(tView)
+		if !ok {
+			continue
+		}
+		if s.flags&FlagDead != 0 {
+			continue
+		}
+		if s.flags&FlagSpawnInvuln != 0 {
+			continue
+		}
+		// Ghost candidate is only valid for kinds with a real AABB.
+		eHe := entityHalfExt(s.kind)
+		if eHe == 0 {
+			continue
+		}
+		ax := s.x - eHe - he
+		bx := s.x + eHe + he
+		ay := s.y - eHe - he
+		by := s.y + eHe + he
+		n, d, ok := segmentVsBox(x0, y0, vx, vy, ax, bx, ay, by)
+		if !ok {
+			continue
+		}
+		if !bestSet || n*bestDen < bestNum*d ||
+			(n*bestDen == bestNum*d && id < bestID) {
+			bestNum, bestDen, bestID, bestSet = n, d, id, true
+		}
+	}
+	return bestNum, bestDen, bestID, bestSet
+}
+
+// lcAllHistories returns every entity-history entry visible to the
+// lag-comp context. The lagCompContext.getHist callback is keyed on
+// ID, so iteration requires a side-channel; the sim wires this via
+// lc.getAllHistories (PHASE4.md §8.6 implementation note).
+func lcAllHistories(lc lagCompContext) map[EntityID]*entityHistory {
+	if lc.getAllHistories == nil {
+		return nil
+	}
+	return lc.getAllHistories()
 }
 
 func entityHalfExt(k EntityKind) int32 {

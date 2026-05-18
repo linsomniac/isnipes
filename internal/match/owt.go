@@ -20,17 +20,26 @@ func NewOWTEstimator() *OWTEstimator {
 	return &OWTEstimator{first: true}
 }
 
+// maxObservedRTTMs caps RTT samples to defend against forged or
+// stale client timestamps. Real-world RTT above 10 s is meaningless
+// for lag comp anyway (the rewind window is 267 ms).
+const maxObservedRTTMs uint32 = 10000
+
 // ObservePong updates the EWMA with one RTT sample (round-trip
 // milliseconds). The OWT estimate is RTT / 2.
 func (o *OWTEstimator) ObservePong(rttMs uint32) {
+	if rttMs > maxObservedRTTMs {
+		rttMs = maxObservedRTTMs
+	}
 	owt := rttMs / 2
 	if o.first {
 		o.smoothedMs = owt
 		o.first = false
 		return
 	}
-	// α = 0.2 → new = old*4/5 + sample/5.
-	o.smoothedMs = (o.smoothedMs*4 + owt) / 5
+	// α = 0.2 → new = old*4/5 + sample/5. Use uint64 intermediates so
+	// the multiply cannot overflow even on adversarial inputs.
+	o.smoothedMs = uint32((uint64(o.smoothedMs)*4 + uint64(owt)) / 5)
 }
 
 // OWTMs returns the current smoothed OWT in milliseconds.

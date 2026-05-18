@@ -428,6 +428,9 @@ func (s *Sim) Tick(inputs []PlayerInput) ([]Event, error) {
 			getHist: func(id EntityID) *entityHistory {
 				return s.store.histories[id]
 			},
+			getAllHistories: func() map[EntityID]*entityHistory {
+				return s.store.histories
+			},
 		}
 		res := resolveProjectile(s.maze, proj, shooterID, shooterKind, candidates, lc)
 		switch res.kind {
@@ -449,6 +452,12 @@ func (s *Sim) Tick(inputs []PlayerInput) ([]Event, error) {
 				if target.HP == 0 {
 					events = s.killEntity(events, target, shooterID)
 				}
+			} else {
+				// Phase 4 §8.6: ghost-candidate hit — the target was
+				// alive at T_view but is now removed (or fully dead).
+				// Emit the hit event so observers see "shot around a
+				// corner" semantics; no slab state to modify.
+				events = append(events, Event{Kind: EventEntityHit, Actor: shooterID, Target: res.targetID, Reason: 0})
 			}
 			s.store.remove(pid)
 		}
@@ -658,7 +667,7 @@ func (s *Sim) writeHistorySamples() {
 			h = &entityHistory{}
 			s.store.histories[e.ID] = h
 		}
-		h.write(t, e.X, e.Y, e.Flags)
+		h.write(t, e.X, e.Y, e.Kind, e.Flags)
 	}
 	// Prune histories for entities removed > 1 tick ago.
 	for id, h := range s.store.histories {

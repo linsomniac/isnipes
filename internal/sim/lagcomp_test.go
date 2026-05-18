@@ -16,11 +16,11 @@ func tile(x, y int) (int32, int32) {
 }
 
 // mkHist constructs an entityHistory with one sample per tick in
-// [startTick, endTick] all at the same (x, y, flags).
+// [startTick, endTick] all at the same (kind, x, y, flags).
 func mkHist(startTick, endTick uint32, x, y int32, flags uint8) *entityHistory {
 	h := &entityHistory{}
 	for t := startTick; t <= endTick; t++ {
-		h.write(t, x, y, flags)
+		h.write(t, x, y, KindPlayer, flags)
 	}
 	return h
 }
@@ -216,6 +216,75 @@ func TestLagCompDeadFlagAtRewoundTick(t *testing.T) {
 	res := resolveProjectile(m, proj, 1, KindPlayer, candidates, lc)
 	if res.kind == projHitEntity {
 		t.Fatalf("dead-at-Tview should skip target")
+	}
+}
+
+// TestLagCompGhostCandidateHitsRemovedEntity: PHASE4 §8.6 — a target
+// that has been removed (no longer in the candidate list) but whose
+// history sample at T_view was alive registers a lag-comp hit.
+func TestLagCompGhostCandidateHitsRemovedEntity(t *testing.T) {
+	m := snapshotMaze()
+	ax, ay := tile(10, 10)
+	bx, by := tile(11, 10)
+	_ = ax
+	// Candidate list deliberately empty — target was removed.
+	candidates := []*Entity{}
+	proj := &Entity{
+		ID: 99, Kind: KindProjectile, HP: 1,
+		X: bx - 96 - 24 - 8, Y: ay, VX: 32, VY: 0,
+	}
+	hist := mkHist(1, 20, bx, by, 0) // alive at all sampled ticks
+	allHist := map[EntityID]*entityHistory{2: hist}
+	lc := lagCompContext{
+		currentTick: 22, owtTicks: 2,
+		getHist: func(id EntityID) *entityHistory {
+			if id == 2 {
+				return hist
+			}
+			return nil
+		},
+		getAllHistories: func() map[EntityID]*entityHistory {
+			return allHist
+		},
+	}
+	res := resolveProjectile(m, proj, 1, KindPlayer, candidates, lc)
+	if res.kind != projHitEntity {
+		t.Fatalf("ghost-candidate should hit; kind=%d", res.kind)
+	}
+	if res.targetID != 2 {
+		t.Fatalf("targetID=%d, want 2 (ghost)", res.targetID)
+	}
+}
+
+// TestLagCompGhostCandidateSkipsDeadAtTview: ghost-candidate path
+// honors the FlagDead/FlagSpawnInvuln filter at T_view.
+func TestLagCompGhostCandidateSkipsDeadAtTview(t *testing.T) {
+	m := snapshotMaze()
+	ax, ay := tile(10, 10)
+	bx, by := tile(11, 10)
+	_ = ax
+	candidates := []*Entity{}
+	proj := &Entity{
+		ID: 99, Kind: KindProjectile, HP: 1,
+		X: bx - 96 - 24 - 8, Y: ay, VX: 32, VY: 0,
+	}
+	hist := mkHist(1, 20, bx, by, FlagDead)
+	allHist := map[EntityID]*entityHistory{2: hist}
+	lc := lagCompContext{
+		currentTick: 22, owtTicks: 2,
+		getHist: func(id EntityID) *entityHistory {
+			if id == 2 {
+				return hist
+			}
+			return nil
+		},
+		getAllHistories: func() map[EntityID]*entityHistory {
+			return allHist
+		},
+	}
+	res := resolveProjectile(m, proj, 1, KindPlayer, candidates, lc)
+	if res.kind == projHitEntity {
+		t.Fatalf("ghost-candidate dead-at-Tview should not hit")
 	}
 }
 

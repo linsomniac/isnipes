@@ -1,6 +1,12 @@
 package sim
 
-import "testing"
+import (
+	"bufio"
+	"os"
+	"strconv"
+	"strings"
+	"testing"
+)
 
 // allFloorMaze returns a maze of (W, H) with outer wall and the
 // interior all TileFloor.
@@ -197,5 +203,62 @@ func TestTurboStrictLock(t *testing.T) {
 	}
 	if e5.X != e4.X || e5.Y != e4.Y {
 		t.Fatalf("idle-cancel: position moved")
+	}
+}
+
+// parsePhysicsConstants reads a key=value file (one constant per
+// line, comments empty) and returns a map[string]int.
+func parsePhysicsConstants(t *testing.T, raw string) map[string]int {
+	t.Helper()
+	out := map[string]int{}
+	sc := bufio.NewScanner(strings.NewReader(raw))
+	for sc.Scan() {
+		line := strings.TrimSpace(sc.Text())
+		if line == "" || !strings.Contains(line, "=") {
+			continue
+		}
+		parts := strings.SplitN(line, "=", 2)
+		k := strings.TrimSpace(parts[0])
+		v, err := strconv.Atoi(strings.TrimSpace(parts[1]))
+		if err != nil {
+			t.Fatalf("constants file: parse %q: %v", line, err)
+		}
+		out[k] = v
+	}
+	if err := sc.Err(); err != nil {
+		t.Fatalf("constants file: scan: %v", err)
+	}
+	return out
+}
+
+// TestPhysicsConstantsTextFile is the Go side of the Phase 4 §14
+// parity oracle. The same file is read by
+// web/tests/sim_constants.test.ts; both sides must match.
+func TestPhysicsConstantsTextFile(t *testing.T) {
+	raw, err := os.ReadFile("../../testdata/sim/physics_constants.txt")
+	if err != nil {
+		t.Fatalf("read constants file: %v", err)
+	}
+	got := parsePhysicsConstants(t, string(raw))
+	want := map[string]int{
+		"subtile_per_tile":    subtilePerTile,
+		"player_speed":        playerSpeed,
+		"player_turbo_speed":  playerTurboSpeed,
+		"player_half_ext":     playerHalfExt,
+		"fire_cooldown_ticks": fireCooldownTicks,
+		"projectile_speed":    projectileSpeed,
+		"projectile_lifetime": projectileLifetime,
+		"generator_half_ext":  generatorHalfExt,
+		"projectile_half_ext": projectileHalfExt,
+	}
+	for k, v := range want {
+		if got[k] != v {
+			t.Errorf("constant %q: file=%d, go=%d (parity drift — update testdata/sim/physics_constants.txt or the Go const)", k, got[k], v)
+		}
+	}
+	for k := range got {
+		if _, ok := want[k]; !ok {
+			t.Errorf("constant %q in file is not asserted by Go side", k)
+		}
 	}
 }

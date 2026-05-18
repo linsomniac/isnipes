@@ -23,6 +23,7 @@ type ServerConfig struct {
 	StaticFS         fs.FS
 	HandshakeTimeout time.Duration // default 5s
 	IdleTimeout      time.Duration // default 5s
+	PingInterval     time.Duration // Phase 4 §4.3.3: default 500ms
 	ServerVersion    string
 }
 
@@ -38,6 +39,9 @@ func NewServer(cfg ServerConfig) *Server {
 	}
 	if cfg.IdleTimeout == 0 {
 		cfg.IdleTimeout = 5 * time.Second
+	}
+	if cfg.PingInterval == 0 {
+		cfg.PingInterval = 500 * time.Millisecond
 	}
 	if cfg.ServerVersion == "" {
 		cfg.ServerVersion = "v0.0.0-phase2"
@@ -188,6 +192,28 @@ func (s *Server) handleMatch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Phase 4 §7.1: server-initiated Ping at 2 Hz. The matching
+	// inbound Pong feeds match.SubmitPong → OWTEstimator.
+	go func() {
+		t := time.NewTicker(s.cfg.PingInterval)
+		defer t.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-t.C:
+				now := uint32(time.Now().UnixMilli())
+				ping := proto.Ping{TsOrigin: now}
+				b, _ := ping.Encode(nil)
+				select {
+				case out <- match.OutboundFrame{Type: proto.MsgPing, Payload: b}:
+				default:
+					// backpressured; skip this ping
+				}
+			}
+		}
+	}()
+
 	// Writer goroutine.
 	go func() {
 		var seq uint16
@@ -245,7 +271,7 @@ func (s *Server) handleMatch(w http.ResponseWriter, r *http.Request) {
 			}
 			m.SubmitInput(pid, inp)
 		case proto.MsgPing:
-			// Echo as Pong.
+			// Echo as Pong (client-initiated ping per §4.3.3).
 			p, err := proto.DecodePing(payload)
 			if err != nil {
 				_ = closeWith(c, CloseMalformed)
@@ -257,6 +283,21 @@ func (s *Server) handleMatch(w http.ResponseWriter, r *http.Request) {
 			case out <- match.OutboundFrame{Type: proto.MsgPong, Payload: b}:
 			default:
 			}
+		case proto.MsgPong:
+			// Phase 4 §7.2: Pong reply to a server-issued Ping.
+			// Compute RTT = now - ts_origin (server clock domain).
+			p, err := proto.DecodePong(payload)
+			if err != nil {
+				_ = closeWith(c, CloseMalformed)
+				m.SubmitClose(pid, 0)
+				return
+			}
+			now := uint32(time.Now().UnixMilli())
+			// Unsigned wrap means a forged future ts_origin yields
+			// a huge RTT; the OWT estimator clamps via
+			// maxObservedRTTMs (PHASE4.md §7 / match/owt.go).
+			rttMs := now - p.TsOrigin
+			m.SubmitPong(pid, rttMs)
 		case proto.MsgMatchJoin:
 			// MatchJoin after first frame is malformed.
 			_ = closeWith(c, CloseMalformed)

@@ -22,6 +22,7 @@ const HistoryDepth = LagCompTicks + 1
 type histSample struct {
 	tick  uint32
 	x, y  int32
+	kind  EntityKind
 	flags uint8
 }
 
@@ -37,14 +38,14 @@ type entityHistory struct {
 // write appends a sample for serverTick t to the ring. The newest
 // sample lands at index (head+1) % HistoryDepth except on first
 // write where it lands at index 0.
-func (h *entityHistory) write(t uint32, x, y int32, flags uint8) {
+func (h *entityHistory) write(t uint32, x, y int32, kind EntityKind, flags uint8) {
 	var next uint8
 	if h.count == 0 {
 		next = 0
 	} else {
 		next = (h.head + 1) % HistoryDepth
 	}
-	h.samples[next] = histSample{tick: t, x: x, y: y, flags: flags}
+	h.samples[next] = histSample{tick: t, x: x, y: y, kind: kind, flags: flags}
 	h.head = next
 	if h.count < HistoryDepth {
 		h.count++
