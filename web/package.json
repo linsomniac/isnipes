@@ -1,0 +1,14 @@
+{
+  "name": "isnipes-web",
+  "version": "0.0.0-phase2",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "vitest run",
+    "build": "echo 'phase 2 placeholder; full vite build comes later'"
+  },
+  "devDependencies": {
+    "vitest": "^2.1.0",
+    "typescript": "^5.4.0"
+  }
+}
