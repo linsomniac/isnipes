@@ -1,0 +1,12 @@
+**Findings**
+- P0: Expired lobby tokens are not tied to match auth. `handleStartMatch` records tokens in `l.tokens` [internal/lobby/lobby.go:410](/home/sean/aix/isnipes/internal/lobby/lobby.go:410), but the match gets an independent token copy and validates only `bySession` presence/single-use [internal/match/match.go:176](/home/sean/aix/isnipes/internal/match/match.go:176), [internal/match/match.go:287](/home/sean/aix/isnipes/internal/match/match.go:287). `expireTokens` only deletes the lobby map [internal/lobby/lobby.go:490](/home/sean/aix/isnipes/internal/lobby/lobby.go:490), so §7.3/§8.2 TTL eviction cannot reject an otherwise valid MatchJoin.
+
+- P0: Lobby disconnect during `IN_MATCH` incorrectly tears down room membership. `handleDisconnect` always calls `removeFromRoom` [internal/lobby/lobby.go:460](/home/sean/aix/isnipes/internal/lobby/lobby.go:460); if the disconnecting session is host, `removeFromRoom` deletes the room [internal/lobby/lobby.go:350](/home/sean/aix/isnipes/internal/lobby/lobby.go:350). §7.1 allows leaving lobby WS during a match, and §7.2 says `IN_MATCH` closes on `MatchOver`, not host lobby close.
+
+- P1: Idle eviction bypasses room cleanup. `expireIdleSessions` closes/deletes sessions directly [internal/lobby/lobby.go:499](/home/sean/aix/isnipes/internal/lobby/lobby.go:499), unlike explicit disconnect cleanup [internal/lobby/lobby.go:465](/home/sean/aix/isnipes/internal/lobby/lobby.go:465). An idle host leaves an `OPEN` room advertised with a dead host, no handoff, and no close.
+
+- P1: Envelope version mismatch is mapped to recoverable `BAD_REQUEST`, not fatal `VERSION` close 1003. `DecodeLobbyEnvelope` reports `ErrLobbyVersion` [internal/proto/lobby.go:138](/home/sean/aix/isnipes/internal/proto/lobby.go:138), but lobby collapses all decode errors to `sendError(...BAD_REQUEST...)` and returns [internal/lobby/lobby.go:200](/home/sean/aix/isnipes/internal/lobby/lobby.go:200), contrary to §6.2.
+
+- P1: Room state advances to `IN_MATCH` immediately after registry creation [internal/lobby/lobby.go:427](/home/sean/aix/isnipes/internal/lobby/lobby.go:427), [internal/lobby/lobby.go:439](/home/sean/aix/isnipes/internal/lobby/lobby.go:439). §7.2 says `IN_MATCH` starts after at least one successful `MatchJoin`; there is no callback path from match join to lobby.
+
+Tests: `GOCACHE=/tmp/isnipes-gocache go test ./...` passed.

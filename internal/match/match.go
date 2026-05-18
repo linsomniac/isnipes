@@ -277,6 +277,11 @@ func (m *Match) handleControl(msg controlMsg) {
 	}
 }
 
+// tokenTTL is the per-token validity window applied at MatchJoin time.
+// Mirrors lobby.TokenTTL (60s) so an expired token gets the same
+// AUTH rejection regardless of which side checks first.
+const tokenTTL = 60 * time.Second
+
 // handleJoin processes a MatchJoin. Reply is sent via v.Reply.
 func (m *Match) handleJoin(v ctlJoin) {
 	// Phase 2 does not support late join (§9.3 / §1 "no late-join").
@@ -288,6 +293,17 @@ func (m *Match) handleJoin(v ctlJoin) {
 	if !ok {
 		v.Reply <- joinResult{Err: ErrAuth}
 		return
+	}
+	// Find the PendingJoin to check TTL.
+	for _, p := range m.cfg.PlayerSlots {
+		if p.Token == v.Token {
+			if m.clock().Sub(p.IssuedAt) > tokenTTL {
+				v.Reply <- joinResult{Err: ErrAuth}
+				delete(m.bySession, v.Token)
+				return
+			}
+			break
+		}
 	}
 	slot, ok := m.slots[pid]
 	if !ok {

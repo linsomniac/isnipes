@@ -199,6 +199,12 @@ func (l *Lobby) handleMessage(v ctlMessage) {
 	s.lastSeen = l.clock()
 	env, err := proto.DecodeLobbyEnvelope(v.Raw)
 	if err != nil {
+		// §6.2: envelope version mismatch is fatal (close 1003);
+		// any other decode failure is recoverable (BAD_REQUEST).
+		if err == proto.ErrLobbyVersion {
+			l.sendErrorAndClose(s, proto.LobbyErrVersion, err.Error(), 1003)
+			return
+		}
 		l.sendError(s, proto.LobbyErrBadRequest, err.Error())
 		return
 	}
@@ -437,7 +443,10 @@ func (l *Lobby) handleStartMatch(s *Session, sm proto.StartMatch) {
 		}
 	}
 	room.MatchID = matchID
-	room.State = RoomInMatch
+	// §7.2: stay in STARTING until at least one MatchJoin succeeds.
+	// Phase 2 does not wire a match→lobby callback for that
+	// transition; rooms remain STARTING until ctlMatchEnded fires.
+	// This is preferable to mislabelling the state.
 
 	// Send each member their own matchStarted.
 	for i, pidStr := range room.Members {
@@ -462,9 +471,16 @@ func (l *Lobby) handleDisconnect(v ctlDisconnect) {
 	if !ok {
 		return
 	}
+	// §7.1: leaving the lobby WS during a match is allowed; the room
+	// stays alive (closes on MatchOver via ctlMatchEnded). Only run
+	// room cleanup if the room is in a pre-match state.
 	if s.roomID != "" {
 		if r, ok := l.rooms[s.roomID]; ok {
-			l.removeFromRoom(s, r)
+			if r.State == RoomOpen {
+				l.removeFromRoom(s, r)
+			}
+			// For STARTING / IN_MATCH / CLOSED, leave the room
+			// untouched; the match lifecycle owns the teardown.
 		}
 	}
 	delete(l.sessions, v.SessionID)
@@ -500,11 +516,9 @@ func (l *Lobby) expireIdleSessions() {
 	now := l.clock()
 	for sid, s := range l.sessions {
 		if now.Sub(s.lastSeen) > l.cfg.IdleTimeout {
-			s.closeOnce.Do(func() {
-				close(s.closed)
-				close(s.out)
-			})
-			delete(l.sessions, sid)
+			// Route through handleDisconnect so room cleanup is
+			// consistent with explicit close paths.
+			l.handleDisconnect(ctlDisconnect{SessionID: sid})
 		}
 	}
 }

@@ -190,6 +190,30 @@ func TestMatchJoinRejectsUnknownToken(t *testing.T) {
 	}
 }
 
+func TestMatchJoinRejectsExpiredToken(t *testing.T) {
+	ft := newFakeTicker()
+	fc := &fakeClock{now: time.Unix(0, 0)}
+	cfg := MatchConfig{
+		MatchID:  "M1",
+		MapSeed:  1,
+		MapWidth: 60, MapHeight: 40,
+		PlayerSlots: []PendingJoin{
+			{MatchID: "M1", Token: "tokA", PlayerID: 1, Nick: "A", IssuedAt: fc.Now()},
+			{MatchID: "M1", Token: "tokB", PlayerID: 2, Nick: "B", IssuedAt: fc.Now()},
+		},
+		Ticker: ft, Clock: fc.Now,
+	}
+	m, _ := NewMatch(cfg)
+	go m.Run()
+	defer m.Abort("test")
+	// Advance past 60s TTL.
+	fc.Advance(61 * time.Second)
+	out := make(chan OutboundFrame, 4)
+	if _, err := m.SubmitJoin("tokA", out); err == nil {
+		t.Fatalf("expected expired-token error, got nil")
+	}
+}
+
 func TestMatchJoinRejectsLateJoin(t *testing.T) {
 	// 3-slot match: 2 join immediately, transitioning to LIVE; the
 	// third (still-valid token) is then rejected.
@@ -200,9 +224,9 @@ func TestMatchJoinRejectsLateJoin(t *testing.T) {
 		MapSeed:  1,
 		MapWidth: 60, MapHeight: 40,
 		PlayerSlots: []PendingJoin{
-			{MatchID: "M1", Token: "tokA", PlayerID: 1, Nick: "A"},
-			{MatchID: "M1", Token: "tokB", PlayerID: 2, Nick: "B"},
-			{MatchID: "M1", Token: "tokC", PlayerID: 3, Nick: "C"},
+			{MatchID: "M1", Token: "tokA", PlayerID: 1, Nick: "A", IssuedAt: fc.Now()},
+			{MatchID: "M1", Token: "tokB", PlayerID: 2, Nick: "B", IssuedAt: fc.Now()},
+			{MatchID: "M1", Token: "tokC", PlayerID: 3, Nick: "C", IssuedAt: fc.Now()},
 		},
 		Ticker: ft, Clock: fc.Now,
 	}
