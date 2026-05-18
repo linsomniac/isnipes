@@ -109,6 +109,11 @@ type ctlInput struct {
 	Input    proto.Input
 }
 
+type ctlPong struct {
+	PlayerID sim.EntityID
+	RTTMs    uint32
+}
+
 type ctlClose struct {
 	PlayerID sim.EntityID
 	Reason   uint8 // §6.4: 0 clean, 1 timeout
@@ -118,6 +123,7 @@ type ctlAbort struct{ Reason string }
 
 func (ctlJoin) controlTag()  {}
 func (ctlInput) controlTag() {}
+func (ctlPong) controlTag()  {}
 func (ctlClose) controlTag() {}
 func (ctlAbort) controlTag() {}
 
@@ -137,6 +143,10 @@ type Match struct {
 
 	// per-player input buffer: latest input received since previous tick.
 	pendingInputs map[sim.EntityID]proto.Input
+
+	// Phase 4 §7 / §15.1: per-player OWT estimator driven by Pong
+	// frames. Read at tick() time to stamp PlayerInput.LagComp.
+	owt map[sim.EntityID]*OWTEstimator
 
 	// emitted match-started flag (per §6.4 "once").
 	matchStartedEmitted bool
@@ -182,10 +192,12 @@ func NewMatch(cfg MatchConfig) (*Match, error) {
 		clock:         cfg.Clock,
 		ticker:        cfg.Ticker,
 		pendingInputs: make(map[sim.EntityID]proto.Input),
+		owt:           make(map[sim.EntityID]*OWTEstimator),
 	}
 	for _, p := range cfg.PlayerSlots {
 		m.slots[p.PlayerID] = &Slot{PlayerID: p.PlayerID, Nick: p.Nick, closed: make(chan struct{})}
 		m.bySession[p.Token] = p.PlayerID
+		m.owt[p.PlayerID] = NewOWTEstimator()
 	}
 	m.setState(StateWaitingForJoins)
 	return m, nil
@@ -226,6 +238,14 @@ func (m *Match) SubmitJoin(token string, out chan<- OutboundFrame) (sim.EntityID
 // the inbox has room.
 func (m *Match) SubmitInput(playerID sim.EntityID, inp proto.Input) {
 	m.in <- ctlInput{PlayerID: playerID, Input: inp}
+}
+
+// SubmitPong forwards an inbound Pong round-trip sample to the
+// match actor so its per-player OWT estimator can update.
+// rttMs is the server-side RTT in milliseconds (now - pong.TsOrigin).
+// PHASE4.md §7.2.
+func (m *Match) SubmitPong(playerID sim.EntityID, rttMs uint32) {
+	m.in <- ctlPong{PlayerID: playerID, RTTMs: rttMs}
 }
 
 // SubmitClose informs the actor that a player's WS has closed.
@@ -280,6 +300,10 @@ func (m *Match) handleControl(msg controlMsg) {
 		}
 		// Latest input for this player wins (§9.2).
 		m.pendingInputs[v.PlayerID] = v.Input
+	case ctlPong:
+		if est, ok := m.owt[v.PlayerID]; ok {
+			est.ObservePong(v.RTTMs)
+		}
 	case ctlClose:
 		m.handleClose(v)
 	case ctlAbort:
@@ -445,12 +469,17 @@ func (m *Match) tick() {
 	// Build per-player input list (one input per joined+alive slot).
 	inputs := make([]sim.PlayerInput, 0, len(m.pendingInputs))
 	for pid, inp := range m.pendingInputs {
+		var lc sim.FireOptions
+		if est, ok := m.owt[pid]; ok {
+			lc.OWTTicks = est.OWTTicks()
+		}
 		inputs = append(inputs, sim.PlayerInput{
 			PlayerID:   pid,
 			Dir:        sim.Dir(inp.Dir),
 			Turbo:      inp.Turbo == 1,
 			FireDir:    sim.Dir(inp.FireDir),
 			ClientTick: inp.ClientTick,
+			LagComp:    lc,
 		})
 	}
 	// Clear the pending buffer (latest-wins consumed).

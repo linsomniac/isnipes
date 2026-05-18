@@ -18,6 +18,10 @@ type playerState struct {
 type projectileState struct {
 	lifetime  uint16
 	shooterID EntityID
+	// Phase 4 §8.4: OWT captured from the shooter's connection at
+	// fire time, in sim ticks. Player-fired projectiles with
+	// owtTicks > 0 are lag-compensated (PHASE4.md §8).
+	owtTicks uint8
 }
 
 // entityStore holds the fixed-capacity slab.
@@ -35,6 +39,7 @@ type entityStore struct {
 	projectiles map[EntityID]*projectileState
 	snipes      map[EntityID]*snipeState     // Phase 3
 	generators  map[EntityID]*generatorState // Phase 3
+	histories   map[EntityID]*entityHistory  // Phase 4 §6
 	nextID      EntityID
 }
 
@@ -44,6 +49,7 @@ func newEntityStore(initialNextID EntityID) *entityStore {
 		projectiles: make(map[EntityID]*projectileState),
 		snipes:      make(map[EntityID]*snipeState),
 		generators:  make(map[EntityID]*generatorState),
+		histories:   make(map[EntityID]*entityHistory),
 		nextID:      initialNextID,
 	}
 }

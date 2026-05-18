@@ -65,6 +65,20 @@ type PlayerInput struct {
 	Turbo      bool
 	FireDir    Dir
 	ClientTick uint16
+
+	// Phase 4 §5.1: per-player lag-compensation options. Zero value
+	// (OWTTicks == 0) means present-time hit detection — the existing
+	// P1/P3 behaviour. Callers that care about lag-comp populate this
+	// with the shooter's per-connection OWT estimate.
+	LagComp FireOptions
+}
+
+// FireOptions augments the queued fire input with optional lag-comp.
+// The zero value yields no rewind. PHASE4.md §5.1.
+type FireOptions struct {
+	// OWTTicks is the per-shooter one-way-time in sim ticks, clamped
+	// to LagCompTicks inside the sim.
+	OWTTicks uint8
 }
 
 // Event mirrors §4.3.2 Event{kind,actor,target,reason}.

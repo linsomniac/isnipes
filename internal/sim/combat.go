@@ -17,6 +17,32 @@ type projHit struct {
 	endY     int32
 }
 
+// lagCompContext supplies the inputs needed to rewind candidate
+// targets to their position at T_view per PHASE4.md §8. The zero
+// value disables lag-comp (present-time hit detection).
+type lagCompContext struct {
+	currentTick uint32
+	owtTicks    uint8
+	getHist     func(EntityID) *entityHistory
+}
+
+func (lc lagCompContext) enabled(shooterKind EntityKind) bool {
+	return shooterKind == KindPlayer && lc.owtTicks > 0 && lc.getHist != nil
+}
+
+func (lc lagCompContext) tView() uint32 {
+	// T_view = T_now - owt_ticks - interp_ticks, clamped to
+	// [T_now - LagCompTicks, T_now].
+	rewind := uint32(lc.owtTicks) + InterpTicks
+	if rewind > LagCompTicks {
+		rewind = LagCompTicks
+	}
+	if rewind > lc.currentTick {
+		return 0
+	}
+	return lc.currentTick - rewind
+}
+
 // resolveProjectile performs the §10.2 unified swept-AABB pass for one
 // projectile against the maze walls and against every candidate entity
 // (already filtered by caller to exclude the shooter, the projectile
@@ -29,7 +55,11 @@ type projHit struct {
 // the full axis-separated sweep with fraction tracking, but the
 // approximation is within 1 subtile and the §10.2 "wall preferred on
 // tie" rule still applies via the ≤ comparison below.
-func resolveProjectile(m *maze, proj *Entity, shooterID EntityID, shooterKind EntityKind, candidates []*Entity) projHit {
+//
+// Phase 4 §8: when lc.enabled(shooterKind) is true, each candidate's
+// per-frame position and flags are sourced from the entity-history
+// ring at T_view rather than from the live Entity.
+func resolveProjectile(m *maze, proj *Entity, shooterID EntityID, shooterKind EntityKind, candidates []*Entity, lc lagCompContext) projHit {
 	x0, y0 := proj.X, proj.Y
 	vx, vy := int32(proj.VX), int32(proj.VY)
 	he := int32(projectileHalfExt)
@@ -60,18 +90,16 @@ func resolveProjectile(m *maze, proj *Entity, shooterID EntityID, shooterKind En
 	var bestNum, bestDen int64 = 0, 1
 	bestSet := false
 	var bestID EntityID
+	useLagComp := lc.enabled(shooterKind)
+	var tView uint32
+	if useLagComp {
+		tView = lc.tView()
+	}
 	for _, e := range candidates {
 		if e.ID == 0 || e.ID == proj.ID || e.ID == shooterID {
 			continue
 		}
 		if e.Kind == KindProjectile {
-			continue
-		}
-		if e.Flags&FlagDead != 0 {
-			continue
-		}
-		// Spawn-invuln targets cannot be hit (Phase 3 §12.2).
-		if e.Flags&FlagSpawnInvuln != 0 {
 			continue
 		}
 		// Phase 3 §12.1: a snipe-fired projectile does not damage
@@ -81,11 +109,30 @@ func resolveProjectile(m *maze, proj *Entity, shooterID EntityID, shooterKind En
 		if shooterKind == KindSnipe && (e.Kind == KindSnipe || e.Kind == KindGenerator) {
 			continue
 		}
+		// Phase 4 §8.3: rewind position/flags if lag-comp engaged
+		// and the candidate has a history sample at T_view; else
+		// fall back to live state.
+		ex, ey, eflags := e.X, e.Y, e.Flags
+		if useLagComp {
+			if h := lc.getHist(e.ID); h != nil {
+				if s, ok := h.at(tView); ok {
+					ex, ey, eflags = s.x, s.y, s.flags
+				}
+			}
+		}
+		if eflags&FlagDead != 0 {
+			continue
+		}
+		// Spawn-invuln targets cannot be hit (Phase 3 §12.2);
+		// Phase 4 §8.3 evaluates the flag at the rewound tick.
+		if eflags&FlagSpawnInvuln != 0 {
+			continue
+		}
 		eHe := entityHalfExt(e.Kind)
-		ax := e.X - eHe - he
-		bx := e.X + eHe + he
-		ay := e.Y - eHe - he
-		by := e.Y + eHe + he
+		ax := ex - eHe - he
+		bx := ex + eHe + he
+		ay := ey - eHe - he
+		by := ey + eHe + he
 		n, d, ok := segmentVsBox(x0, y0, vx, vy, ax, bx, ay, by)
 		if !ok {
 			continue

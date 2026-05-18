@@ -385,6 +385,13 @@ func (s *Sim) Tick(inputs []PlayerInput) ([]Event, error) {
 	// Step 4.6: generator emission (ID-sorted). Iter 4 will populate.
 	events = append(events, s.stepGeneratorsEmission()...)
 
+	// Step 4.9 (Phase 4 §6.2): write per-entity history sample for
+	// every occupied slot, then prune histories for entities removed
+	// more than 1 tick ago. The sample reflects each entity's position
+	// at the end of the movement phase; resolveProjectile reads it
+	// when a player-fired projectile carries OWTTicks > 0.
+	s.writeHistorySamples()
+
 	// Step 5: resolve projectile motion + collision (ID-sorted).
 	// Build candidates: every live, non-projectile entity.
 	preTickProjIDs := make([]EntityID, 0, 16)
@@ -413,7 +420,16 @@ func (s *Sim) Tick(inputs []PlayerInput) ([]Event, error) {
 		// Build candidates fresh each projectile (other entities may
 		// have died earlier in this step).
 		candidates := s.collectHitCandidates()
-		res := resolveProjectile(s.maze, proj, shooterID, shooterKind, candidates)
+		// Phase 4 §8: lag-comp context for player-fired projectiles
+		// with captured OWT > 0.
+		lc := lagCompContext{
+			currentTick: s.serverTick,
+			owtTicks:    projState.owtTicks,
+			getHist: func(id EntityID) *entityHistory {
+				return s.store.histories[id]
+			},
+		}
+		res := resolveProjectile(s.maze, proj, shooterID, shooterKind, candidates, lc)
 		switch res.kind {
 		case projHitNone:
 			proj.X, proj.Y = res.endX, res.endY
@@ -506,9 +522,18 @@ func (s *Sim) Tick(inputs []PlayerInput) ([]Event, error) {
 			VX:     int16(vx),
 			VY:     int16(vy),
 		}
+		// Phase 4 §8.4: capture shooter's per-conn OWT (clamped to
+		// LagCompTicks). Subsequent ticks of motion use this fixed
+		// value; live OWT EWMA drift mid-flight does not affect
+		// already-fired projectiles.
+		owt := inp.LagComp.OWTTicks
+		if owt > LagCompTicks {
+			owt = LagCompTicks
+		}
 		s.store.projectiles[pid] = &projectileState{
 			lifetime:  projectileLifetime,
 			shooterID: id,
+			owtTicks:  owt,
 		}
 		events = append(events, Event{Kind: EventEntitySpawn, Actor: id, Target: pid, Reason: 0})
 	}
@@ -543,6 +568,12 @@ func (s *Sim) Tick(inputs []PlayerInput) ([]Event, error) {
 		ps.fireCooldown = 0
 		ps.lastDir = DirIdle
 		ps.hasRespawnAt = false
+		// Phase 4 §6.4: drop pre-death history samples so old
+		// positions cannot rewind into a hit on the newly-spawned
+		// (FlagSpawnInvuln) entity.
+		if h, ok := s.store.histories[id]; ok {
+			h.reset()
+		}
 		events = append(events, Event{Kind: EventEntitySpawn, Actor: 0, Target: id, Reason: 0})
 	}
 
@@ -603,6 +634,44 @@ func (s *Sim) garbageCollect() {
 			// Phase 3 §13 step 9 — dead snipes are GC'd same tick.
 			id := e.ID
 			s.store.remove(id)
+		}
+	}
+}
+
+// writeHistorySamples implements PHASE4.md §6.2 step 4.9.
+//
+// For each occupied slot, append a sample with the entity's current
+// (X, Y, Flags) at serverTick. Then prune histories whose owning
+// entity is no longer in the slab AND whose newest sample is older
+// than current serverTick - 1 (§6.4 "one extra tick" rule).
+func (s *Sim) writeHistorySamples() {
+	t := s.serverTick
+	liveSet := make(map[EntityID]struct{}, maxEntities)
+	for i := range s.store.slots {
+		e := &s.store.slots[i]
+		if e.ID == 0 {
+			continue
+		}
+		liveSet[e.ID] = struct{}{}
+		h, ok := s.store.histories[e.ID]
+		if !ok {
+			h = &entityHistory{}
+			s.store.histories[e.ID] = h
+		}
+		h.write(t, e.X, e.Y, e.Flags)
+	}
+	// Prune histories for entities removed > 1 tick ago.
+	for id, h := range s.store.histories {
+		if _, live := liveSet[id]; live {
+			continue
+		}
+		if h.count == 0 {
+			delete(s.store.histories, id)
+			continue
+		}
+		head := h.samples[h.head].tick
+		if t > head+1 {
+			delete(s.store.histories, id)
 		}
 	}
 }

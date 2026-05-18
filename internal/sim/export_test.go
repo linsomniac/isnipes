@@ -159,6 +159,20 @@ func LiveProjectileIDsForTest(s *Sim) []EntityID {
 	return out
 }
 
+// HistoryAtForTest exposes the per-entity history ring lookup. Used
+// by Phase 4 §8 lag-comp tests. Returns (x, y, flags, tick, ok).
+func HistoryAtForTest(s *Sim, id EntityID, t uint32) (int32, int32, uint8, uint32, bool) {
+	h, ok := s.store.histories[id]
+	if !ok {
+		return 0, 0, 0, 0, false
+	}
+	smp, ok := h.at(t)
+	if !ok {
+		return 0, 0, 0, 0, false
+	}
+	return smp.x, smp.y, smp.flags, smp.tick, true
+}
+
 // AllSpawnTilesForTest returns every TileSpawnPlayer tile.
 func AllSpawnTilesForTest(s *Sim) [][2]int {
 	var out [][2]int
