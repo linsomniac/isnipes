@@ -43,6 +43,15 @@ func TestLOS_DiagonalCornerBlock(t *testing.T) {
 	}
 }
 
+func TestLOS_DiagonalSingleWallCornerBlock(t *testing.T) {
+	// Supercover: a single wall at one of the perpendicular tiles
+	// blocks LOS along the diagonal (line scrapes the wall corner).
+	m := fixtureMaze(30, 30, []tilePos{{6, 5}})
+	if HasLOS(m, 5, 5, 7, 7, 20) {
+		t.Fatalf("LOS should be blocked by single-wall diagonal corner")
+	}
+}
+
 func TestLOS_DiagonalOpen(t *testing.T) {
 	// Same diagonal but no wall corner: LOS should pass.
 	m := fixtureMaze(30, 30, nil)

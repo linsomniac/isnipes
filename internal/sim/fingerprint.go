@@ -130,6 +130,10 @@ func (s *Sim) Fingerprint() [32]byte {
 			h.Write(buf[:2])
 			putLE32(buf[:4], ss.lastBFSTick)
 			h.Write(buf[:4])
+			// Phase 3 §15.1: spawnTick is needed because aiStepIdle
+			// clears FlagSpawnInvuln on (serverTick - spawnTick > 15).
+			putLE32(buf[:4], ss.spawnTick)
+			h.Write(buf[:4])
 			pathLen := byte(len(ss.bfsPath))
 			if pathLen > 3 {
 				pathLen = 3
@@ -154,8 +158,11 @@ func (s *Sim) Fingerprint() [32]byte {
 			putLE32(buf[:4], uint32(ss.parentGen))
 			h.Write(buf[:4])
 		} else {
-			// Pad the snipe block: 1 + 2 + 4 + 1 + 3*2 + 4 + 2 + 2 + 4 = 26 bytes.
-			h.Write(make([]byte, 26))
+			// Pad the snipe block: aiState(1) + aiTimer(2) +
+			// lastBFSTick(4) + spawnTick(4) + pathLen(1) + path(3*2) +
+			// chaseTarget(4) + losLostTicks(2) + fireCooldown(2) +
+			// parentGen(4) = 30 bytes.
+			h.Write(make([]byte, 30))
 		}
 		if e.Kind == KindGenerator {
 			gs := s.store.generators[id]

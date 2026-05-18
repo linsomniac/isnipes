@@ -377,13 +377,21 @@ func (m *Match) joinedCount() int {
 	return n
 }
 
-// startOrAbort transitions to LIVE if ≥ 2 players have joined, else
-// aborts with NO_OPPONENT.
+// startOrAbort transitions to LIVE if enough players have joined,
+// else aborts with NO_OPPONENT.
+//
+// PvP-only matches (LevelLetter=0) require ≥ 2 players per §9.3
+// LAST_STANDING semantics. PvE matches (level table active) accept a
+// single player — SPEC §3.8.2 explicitly allows solo PvE.
 func (m *Match) startOrAbort() {
 	if m.state() != StateWaitingForJoins {
 		return
 	}
-	if m.joinedCount() < 2 {
+	minPlayers := 2
+	if m.cfg.LevelLetter != 0 {
+		minPlayers = 1
+	}
+	if m.joinedCount() < minPlayers {
 		m.abort("NO_OPPONENT")
 		return
 	}
@@ -545,7 +553,7 @@ func (m *Match) endMatch(reason uint8, winner sim.EntityID) {
 		FinalTick:   finalTick,
 		Reason:      reason,
 		WinnerIDOr0: uint32(winner),
-		Entries:     m.buildMatchOverEntries(winner),
+		Entries:     m.buildMatchOverEntries(winner, reason),
 	}
 	for _, slot := range m.slots {
 		if !slot.Joined {
@@ -557,15 +565,33 @@ func (m *Match) endMatch(reason uint8, winner sim.EntityID) {
 	m.drainInboxAfterEnd()
 }
 
-func (m *Match) buildMatchOverEntries(winner sim.EntityID) []proto.MatchOverEntry {
+func (m *Match) buildMatchOverEntries(winner sim.EntityID, reason uint8) []proto.MatchOverEntry {
+	// Phase 3 §14: under PVE_COMPLETE all *surviving* players have
+	// LivesRemaining=1; under LAST_STANDING only the winner does.
+	// ALL_ELIMINATED leaves all at 0.
+	living := make(map[sim.EntityID]bool)
+	if m.sim != nil {
+		for _, ent := range m.sim.Entities() {
+			if ent.Kind == sim.KindPlayer && ent.Flags&sim.FlagDead == 0 {
+				living[ent.ID] = true
+			}
+		}
+	}
 	entries := make([]proto.MatchOverEntry, 0, len(m.slots))
 	for pid, slot := range m.slots {
 		if !slot.Joined {
 			continue
 		}
-		lives := uint8(0)
-		if pid == winner {
-			lives = 1
+		var lives uint8
+		switch reason {
+		case proto.EndPVEComplete:
+			if living[pid] {
+				lives = 1
+			}
+		case proto.EndLastStanding:
+			if pid == winner {
+				lives = 1
+			}
 		}
 		entries = append(entries, proto.MatchOverEntry{
 			PlayerID:       uint32(pid),

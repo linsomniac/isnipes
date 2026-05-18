@@ -279,6 +279,39 @@ func TestPvEMatchPVECompleteFires(t *testing.T) {
 	}
 }
 
+func TestSoloPvEMatchStarts(t *testing.T) {
+	ft := newFakeTicker()
+	fc := &fakeClock{now: time.Unix(0, 0)}
+	cfg := MatchConfig{
+		MatchID:   "M-solo-pve",
+		MapSeed:   1,
+		MapWidth:  60,
+		MapHeight: 40,
+		PlayerSlots: []PendingJoin{
+			{MatchID: "M-solo-pve", Token: "tokA", PlayerID: 1, Nick: "A", IssuedAt: fc.Now()},
+		},
+		Ticker:      ft,
+		Clock:       fc.Now,
+		LevelLetter: 'A',
+		LevelNumber: 1,
+	}
+	m, err := NewMatch(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan struct{})
+	go func() { m.Run(); close(done) }()
+	defer func() { <-done }()
+	outA := make(chan OutboundFrame, 64)
+	if _, err := m.SubmitJoin("tokA", outA); err != nil {
+		t.Fatal(err)
+	}
+	if m.State() != StateLive {
+		t.Fatalf("solo PvE didn't transition to LIVE; state=%d", m.State())
+	}
+	m.Abort("test")
+}
+
 func TestMatchJoinRejectsLateJoin(t *testing.T) {
 	// 3-slot match: 2 join immediately, transitioning to LIVE; the
 	// third (still-valid token) is then rejected.

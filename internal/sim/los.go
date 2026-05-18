@@ -63,11 +63,12 @@ func HasLOS(m *maze, sx, sy, tx, ty, maxRange int) bool {
 			y += stepY
 			tMaxY += ax << 1
 		} else {
-			// Perfect diagonal — supercover check: both
-			// perpendicular neighbours must be non-wall, else block.
+			// Perfect diagonal — supercover variant: block when
+			// EITHER perpendicular neighbour is a wall (the line
+			// "scrapes" a wall corner). PHASE3.md §9.1.
 			nbrA := m.at(x+stepX, y)
 			nbrB := m.at(x, y+stepY)
-			if nbrA == TileWall && nbrB == TileWall {
+			if nbrA == TileWall || nbrB == TileWall {
 				return false
 			}
 			x += stepX

@@ -571,6 +571,10 @@ func (s *Sim) killEntity(events []Event, e *Entity, killer EntityID) []Event {
 		}
 	case KindGenerator:
 		events = append(events, Event{Kind: EventGeneratorDestroyed, Actor: killer, Target: e.ID, Reason: 0})
+	case KindSnipe:
+		if ss := s.store.snipes[e.ID]; ss != nil {
+			ss.aiState = AIStateDead
+		}
 	}
 	return events
 }
@@ -595,6 +599,10 @@ func (s *Sim) garbageCollect() {
 				id := e.ID
 				s.store.remove(id)
 			}
+		case KindSnipe:
+			// Phase 3 §13 step 9 — dead snipes are GC'd same tick.
+			id := e.ID
+			s.store.remove(id)
 		}
 	}
 }

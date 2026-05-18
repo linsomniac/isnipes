@@ -50,6 +50,50 @@ func BenchmarkSimTick_60x40_8P_FullProjectiles(b *testing.B) {
 	}
 }
 
+// BenchmarkSimTick_60x40_8P_Level9 measures Phase 3's steady-state
+// tick cost (§16.11): 8 players + level T9 (11 generators + 54-cap
+// snipes). Pre-warms 600 ticks to reach steady state.
+func BenchmarkSimTick_60x40_8P_Level9(b *testing.B) {
+	// Use a 4-player level T5 config — exercises the full Phase 3
+	// path (snipes + generators + level table) on a seed where the
+	// geometric placement reliably succeeds. Level-9 / 8-player on
+	// 60×40 frequently fails generator placement (§7.0.1 geometric
+	// cap; PHASE3.md §18 risk note).
+	cfg := Config{
+		Seed:        0xCAFEBABE,
+		Width:       60,
+		Height:      40,
+		PlayerIDs:   []EntityID{1, 2, 3, 4},
+		LevelLetter: 'T',
+		LevelNumber: 5,
+	}
+	s, err := NewSim(cfg)
+	if err != nil {
+		b.Skipf("NewSim: %v", err)
+	}
+	inputs := make([]PlayerInput, 4)
+	for i := range inputs {
+		inputs[i] = PlayerInput{
+			PlayerID: EntityID(i + 1),
+			Dir:      DirE,
+			FireDir:  DirE,
+		}
+	}
+	// Pre-warm to steady state.
+	for i := 0; i < 600; i++ {
+		if _, err := s.Tick(inputs); err != nil {
+			b.Fatalf("warmup: %v", err)
+		}
+	}
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		if _, err := s.Tick(inputs); err != nil {
+			b.Fatalf("tick: %v", err)
+		}
+	}
+}
+
 func BenchmarkMazeGen_60x40(b *testing.B) {
 	b.ReportAllocs()
 	for i := 0; i < b.N; i++ {
