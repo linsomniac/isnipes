@@ -12,6 +12,15 @@ type playerState struct {
 	deathX        int32
 	deathY        int32
 	hasRespawnAt  bool
+
+	// Phase 5 §6 — lives, score, spawn invulnerability, and the
+	// eliminated sentinel. spawnInvulnUntil == 0 means "not currently
+	// invulnerable"; otherwise the server tick at which the flag is
+	// cleared. eliminated is one-way: once set, no respawn re-arms.
+	livesRemaining   uint8
+	score            int32
+	spawnInvulnUntil uint32
+	eliminated       bool
 }
 
 // projectileState carries per-projectile unexported fields.

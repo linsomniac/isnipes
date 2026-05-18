@@ -14,20 +14,21 @@ type LevelParams struct {
 
 // Phase 3 §6 snipe constants.
 const (
-	snipeHalfExt        int32  = 80
-	snipeBaseSpeed      int32  = 12
-	snipeBrutalSpeed    int32  = 15
-	snipeBaseFireCD     uint16 = 20
-	snipeHardFireCD     uint16 = 15
-	generatorHPBase     uint8  = 3
-	generatorHPBrutal   uint8  = 5
-	spawnInvulnTicks    uint16 = 15 // 0.5s @ 30Hz
-	snipeChaseLOSLostCD uint16 = 60 // ticks of no-LOS before falling back to PATROL
-	bfsRecomputeEvery   uint32 = 15
-	snipePatrolMinTimer uint16 = 30
-	snipePatrolMaxTimer uint16 = 90
-	emitCooldownMin     uint16 = 120 // 4s @ 30Hz
-	emitCooldownMax     uint16 = 240 // 8s @ 30Hz
+	snipeHalfExt           int32  = 80
+	snipeBaseSpeed         int32  = 12
+	snipeBrutalSpeed       int32  = 15
+	snipeBaseFireCD        uint16 = 20
+	snipeHardFireCD        uint16 = 15
+	generatorHPBase        uint8  = 3
+	generatorHPBrutal      uint8  = 5
+	spawnInvulnTicks       uint16 = 15 // Phase 3 — snipe IDLE→PATROL window (0.5s @ 30Hz)
+	playerSpawnInvulnTicks uint16 = 60 // Phase 5 §3.9 — player invuln window (2s @ 30Hz)
+	snipeChaseLOSLostCD    uint16 = 60 // ticks of no-LOS before falling back to PATROL
+	bfsRecomputeEvery      uint32 = 15
+	snipePatrolMinTimer    uint16 = 30
+	snipePatrolMaxTimer    uint16 = 90
+	emitCooldownMin        uint16 = 120 // 4s @ 30Hz
+	emitCooldownMax        uint16 = 240 // 8s @ 30Hz
 )
 
 // LookupLevel returns the params for (letter, number).

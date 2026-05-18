@@ -2,6 +2,7 @@ package sim
 
 import (
 	"crypto/sha256"
+	"hash"
 )
 
 // putLE16/32 write little-endian scalars without importing
@@ -104,6 +105,9 @@ func (s *Sim) Fingerprint() [32]byte {
 			h.Write(buf[:2])
 			putLE32(buf[:4], 0)
 			h.Write(buf[:4])
+			// Phase 5 §16.1: livesRemaining(u8), spawnInvulnUntil(u32),
+			// score(i32), eliminated(u8).
+			writePlayerScoreBlock(h, ps)
 		} else if e.Kind == KindProjectile {
 			// fireCooldown, lastDir, lastInputTick, respawnAt, deathX,
 			// deathY = 0.
@@ -113,9 +117,12 @@ func (s *Sim) Fingerprint() [32]byte {
 			h.Write(buf[:2])
 			putLE32(buf[:4], uint32(pst.shooterID))
 			h.Write(buf[:4])
+			// Phase 5: pad the player-score block (10 bytes).
+			h.Write(make([]byte, playerScoreBlockLen))
 		} else {
-			// Generator / Snipe: pad the P1 player+projectile block.
-			h.Write(make([]byte, 1+1+2+4+4+4+2+4))
+			// Generator / Snipe: pad the P1 player+projectile block plus
+			// the Phase 5 player-score block.
+			h.Write(make([]byte, 1+1+2+4+4+4+2+4+playerScoreBlockLen))
 		}
 
 		// Phase 3 §15.1: per-snipe + per-generator extension bytes.
@@ -181,6 +188,20 @@ func (s *Sim) Fingerprint() [32]byte {
 		}
 	}
 
+	// 6.5 (Phase 5 §16.1): every playerState whose slab entry has been
+	// GC'd (eliminated players, per §6.5) contributes a tail block so
+	// the final scoreboard remains in the fingerprint. Ordered by
+	// ascending EntityID. We first emit a u8 count, then per-record
+	// (EntityID u32, score block).
+	tail := eliminatedTailIDs(s)
+	buf[0] = byte(len(tail))
+	h.Write(buf[:1])
+	for _, id := range tail {
+		putLE32(buf[:4], uint32(id))
+		h.Write(buf[:4])
+		writePlayerScoreBlock(h, s.store.players[id])
+	}
+
 	// 7. Per-entity PCG marshalled bytes, ascending EntityID.
 	for _, id := range entityPRNGKeysSorted(s.entityPRNGs) {
 		pcg := s.entityPRNGs.cache[id]
@@ -196,6 +217,46 @@ func (s *Sim) Fingerprint() [32]byte {
 
 	var out [32]byte
 	copy(out[:], h.Sum(nil))
+	return out
+}
+
+// playerScoreBlockLen is the length of the Phase 5 score block emitted
+// per playerState: livesRemaining(1) + spawnInvulnUntil(4) + score(4)
+// + eliminated(1) = 10 bytes.
+const playerScoreBlockLen = 10
+
+// writePlayerScoreBlock writes a 10-byte block for the given player
+// state. A nil ps writes the zero block (safe for the slab-pad path).
+func writePlayerScoreBlock(h hash.Hash, ps *playerState) {
+	var b [playerScoreBlockLen]byte
+	if ps == nil {
+		h.Write(b[:])
+		return
+	}
+	b[0] = ps.livesRemaining
+	putLE32(b[1:5], ps.spawnInvulnUntil)
+	putLE32(b[5:9], uint32(ps.score))
+	if ps.eliminated {
+		b[9] = 1
+	}
+	h.Write(b[:])
+}
+
+// eliminatedTailIDs collects every playerID whose record persists in
+// s.store.players but whose slab entry is no longer present (i.e. the
+// player has been eliminated AND GC'd, or fully removed). Returns IDs
+// ascending. NOTE: this includes any player removed under NoRespawn
+// (Phase 2 PvP terminal-death) as well, because the playerState map
+// is retained for eliminated records — under NoRespawn the record is
+// removed by entityStore.remove, so this returns empty there.
+func eliminatedTailIDs(s *Sim) []EntityID {
+	out := make([]EntityID, 0, len(s.store.players))
+	for id := range s.store.players {
+		if s.store.findByID(id) < 0 {
+			out = append(out, id)
+		}
+	}
+	sortEntityIDs(out)
 	return out
 }
 

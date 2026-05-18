@@ -47,7 +47,12 @@ func NewSim(cfg Config) (*Sim, error) {
 		playerIDs:   append([]EntityID(nil), cfg.PlayerIDs...),
 	}
 
-	// Allocate players at acceptedSpawns[k] (§8).
+	// Allocate players at acceptedSpawns[k] (§8). Phase 5: stamp initial
+	// spawn-invulnerability for playerSpawnInvulnTicks (60 @ 30Hz = 2s)
+	// and seed the per-player livesRemaining counter from the level
+	// table (or the PvP-only default per §6.2). Distinct from snipes'
+	// shorter 15-tick window (see levels.go for the rationale).
+	startLives := startingLivesFor(cfg)
 	for k, pid := range cfg.PlayerIDs {
 		idx := s.store.alloc()
 		spawn := res.playerSpawns[k]
@@ -56,11 +61,15 @@ func NewSim(cfg Config) (*Sim, error) {
 			Kind:   KindPlayer,
 			HP:     playerHP,
 			Facing: DirS,
-			Flags:  0,
+			Flags:  FlagSpawnInvuln,
 			X:      int32(spawn.X*subtilePerTile + subtilePerTile/2),
 			Y:      int32(spawn.Y*subtilePerTile + subtilePerTile/2),
 		}
-		s.store.players[pid] = &playerState{lastDir: DirIdle}
+		s.store.players[pid] = &playerState{
+			lastDir:          DirIdle,
+			livesRemaining:   startLives,
+			spawnInvulnUntil: uint32(playerSpawnInvulnTicks),
+		}
 	}
 
 	// Allocate generators in tile row-major order. When a level is
@@ -501,6 +510,10 @@ func (s *Sim) Tick(inputs []PlayerInput) ([]Event, error) {
 		if ps.fireCooldown > 0 {
 			continue
 		}
+		// Phase 5 §7.3: cannot fire while spawn-invulnerable. Silent drop.
+		if ps.spawnInvulnUntil > s.serverTick {
+			continue
+		}
 		// Live projectile count.
 		liveProj := 0
 		for j := range s.store.slots {
@@ -567,8 +580,9 @@ func (s *Sim) Tick(inputs []PlayerInput) ([]Event, error) {
 			ps.respawnAt = s.serverTick + 1
 			continue
 		}
-		// Reset player in place.
-		e.Flags = 0
+		// Reset player in place. Phase 5 §6.4: stamp the new
+		// spawn-invulnerability window (60 ticks = 2s).
+		e.Flags = FlagSpawnInvuln
 		e.HP = playerHP
 		e.X = int32(t.X*subtilePerTile + subtilePerTile/2)
 		e.Y = int32(t.Y*subtilePerTile + subtilePerTile/2)
@@ -577,6 +591,7 @@ func (s *Sim) Tick(inputs []PlayerInput) ([]Event, error) {
 		ps.fireCooldown = 0
 		ps.lastDir = DirIdle
 		ps.hasRespawnAt = false
+		ps.spawnInvulnUntil = s.serverTick + uint32(playerSpawnInvulnTicks)
 		// Phase 4 §6.4: drop pre-death history samples so old
 		// positions cannot rewind into a hit on the newly-spawned
 		// (FlagSpawnInvuln) entity.
@@ -584,6 +599,27 @@ func (s *Sim) Tick(inputs []PlayerInput) ([]Event, error) {
 			h.reset()
 		}
 		events = append(events, Event{Kind: EventEntitySpawn, Actor: 0, Target: id, Reason: 0})
+	}
+
+	// Step 8.5 (Phase 5 §6.4): clear FlagSpawnInvuln for any player
+	// whose invulnerability window has elapsed.
+	for _, id := range s.store.liveIDsSorted() {
+		idx := s.store.findByID(id)
+		if idx < 0 {
+			continue
+		}
+		e := &s.store.slots[idx]
+		if e.Kind != KindPlayer {
+			continue
+		}
+		ps := s.store.players[id]
+		if ps == nil {
+			continue
+		}
+		if ps.spawnInvulnUntil != 0 && s.serverTick >= ps.spawnInvulnUntil {
+			e.Flags &^= FlagSpawnInvuln
+			ps.spawnInvulnUntil = 0
+		}
 	}
 
 	// Step 9: GC.
@@ -595,6 +631,12 @@ func (s *Sim) Tick(inputs []PlayerInput) ([]Event, error) {
 
 // killEntity runs the §10.4 pipeline for one dying entity. Appends
 // events for entity_kill (and generator_destroyed if applicable).
+//
+// Phase 5 §6.3: on a player kill, the victim's livesRemaining
+// decrements and the killer's score is credited per §3.8. When the
+// victim hits zero lives, eliminated is set and the respawn schedule
+// is suppressed. The −5 own-score death penalty applies to the victim
+// regardless of killer identity.
 func (s *Sim) killEntity(events []Event, e *Entity, killer EntityID) []Event {
 	e.Flags = FlagDead
 	e.VX, e.VY = 0, 0
@@ -605,22 +647,45 @@ func (s *Sim) killEntity(events []Event, e *Entity, killer EntityID) []Event {
 		ps.deathX, ps.deathY = e.X, e.Y
 		ps.fireCooldown = 0
 		ps.lastDir = DirIdle
-		if !s.cfg.NoRespawn {
+		// Phase 5 §3.8: score deltas. Killer credit first (the victim's
+		// own score is debited regardless of killer).
+		if killer != e.ID {
+			s.awardKill(killer, KindPlayer)
+		}
+		ps.score += deathPenaltyOwn
+		// Phase 5 §3.9: lives decrement. Reaching zero is one-way and
+		// suppresses respawn.
+		if ps.livesRemaining > 0 {
+			ps.livesRemaining--
+		}
+		if ps.livesRemaining == 0 {
+			ps.eliminated = true
+			ps.hasRespawnAt = false
+		} else if !s.cfg.NoRespawn {
 			ps.respawnAt = s.serverTick + respawnTimerTicks
 			ps.hasRespawnAt = true
 		}
 	case KindGenerator:
 		events = append(events, Event{Kind: EventGeneratorDestroyed, Actor: killer, Target: e.ID, Reason: 0})
+		s.awardKill(killer, KindGenerator)
 	case KindSnipe:
 		if ss := s.store.snipes[e.ID]; ss != nil {
 			ss.aiState = AIStateDead
 		}
+		s.awardKill(killer, KindSnipe)
 	}
 	return events
 }
 
-// garbageCollect removes dead generators and (under NoRespawn) dead
-// players. Projectile slots were freed inline. §11 step 9.
+// garbageCollect removes dead generators, dead snipes, and dead
+// players who are either under NoRespawn=true (Phase 2 PvP-only
+// terminal-death mode) OR have been eliminated (Phase 5 §6.5: lives
+// reached zero). Projectile slots were freed inline. §11 step 9.
+//
+// AIDEV-NOTE: for eliminated players the slab entry is removed but
+// the playerState map record is retained so Sim.Scores() continues
+// to report the final lives/score and the fingerprint (§16.1)
+// remains stable across re-entry into iteration.
 func (s *Sim) garbageCollect() {
 	for i := range s.store.slots {
 		e := &s.store.slots[i]
@@ -635,9 +700,20 @@ func (s *Sim) garbageCollect() {
 			id := e.ID
 			s.store.remove(id)
 		case KindPlayer:
-			if s.cfg.NoRespawn {
+			ps := s.store.players[e.ID]
+			if s.cfg.NoRespawn || (ps != nil && ps.eliminated) {
 				id := e.ID
-				s.store.remove(id)
+				slabOnlyRemove := ps != nil && ps.eliminated && !s.cfg.NoRespawn
+				if slabOnlyRemove {
+					// Phase 5 §6.5: retain playerState (and history)
+					// for the eliminated record; clear only the slab.
+					idx := s.store.findByID(id)
+					if idx >= 0 {
+						s.store.slots[idx] = Entity{}
+					}
+				} else {
+					s.store.remove(id)
+				}
 			}
 		case KindSnipe:
 			// Phase 3 §13 step 9 — dead snipes are GC'd same tick.

@@ -71,7 +71,9 @@ func OverrideMazeForTest(s *Sim, w, h int, tiles []Tile) {
 	s.mapBytes = packTiles(s.maze)
 }
 
-// PlacePlayerForTest force-sets a player's subtile position.
+// PlacePlayerForTest force-sets a player's subtile position. Phase 5:
+// also clears the initial spawn-invulnerability so tests that fire
+// projectiles immediately after placement aren't gated.
 func PlacePlayerForTest(s *Sim, id EntityID, x, y int32) {
 	idx := s.store.findByID(id)
 	if idx < 0 {
@@ -79,6 +81,23 @@ func PlacePlayerForTest(s *Sim, id EntityID, x, y int32) {
 	}
 	s.store.slots[idx].X = x
 	s.store.slots[idx].Y = y
+	s.store.slots[idx].Flags &^= FlagSpawnInvuln
+	if ps, ok := s.store.players[id]; ok {
+		ps.spawnInvulnUntil = 0
+	}
+}
+
+// ClearSpawnInvulnForTest forces FlagSpawnInvuln off for one player.
+// Use when a test needs to drive fire input on tick 0 without waiting
+// out the §3.9 invulnerability window.
+func ClearSpawnInvulnForTest(s *Sim, id EntityID) {
+	idx := s.store.findByID(id)
+	if idx >= 0 {
+		s.store.slots[idx].Flags &^= FlagSpawnInvuln
+	}
+	if ps, ok := s.store.players[id]; ok {
+		ps.spawnInvulnUntil = 0
+	}
 }
 
 // PlaceGeneratorForTest spawns a generator at a chosen tile centre.
