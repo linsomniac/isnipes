@@ -104,7 +104,7 @@ func TestQuickRoundTrip_Snapshot(t *testing.T) {
 				Kind:   uint8(i % 4),
 				HP:     uint8(i),
 				Facing: uint8((i % 8) + 1),
-				Flags:  uint8(i & 0x7),
+				Flags:  uint8(i & 0x5), // only {FlagDead, FlagTurbo}
 				X:      int32(i) * 257,
 				Y:      int32(i) * -257,
 				VX:     int16(i),
@@ -226,6 +226,27 @@ func TestRoundTrip_Scoreboard(t *testing.T) {
 	}
 	if !reflect.DeepEqual(dec, in) {
 		t.Fatalf("mismatch:\n in: %+v\nout: %+v", in, dec)
+	}
+}
+
+func TestSnapshotEncodeRejectsUnsortedIDs(t *testing.T) {
+	snap := Snapshot{Entities: []Entity{{ID: 5}, {ID: 3}}}
+	if _, err := snap.Encode(nil); !errors.Is(err, ErrMalformed) {
+		t.Fatalf("err = %v, want ErrMalformed for unsorted IDs", err)
+	}
+}
+
+func TestSnapshotEncodeRejectsDuplicateIDs(t *testing.T) {
+	snap := Snapshot{Entities: []Entity{{ID: 5}, {ID: 5}}}
+	if _, err := snap.Encode(nil); !errors.Is(err, ErrMalformed) {
+		t.Fatalf("err = %v, want ErrMalformed for duplicate IDs", err)
+	}
+}
+
+func TestSnapshotEncodeRejectsDisallowedFlagBits(t *testing.T) {
+	snap := Snapshot{Entities: []Entity{{ID: 1, Flags: FlagSpawnInvuln}}}
+	if _, err := snap.Encode(nil); !errors.Is(err, ErrMalformed) {
+		t.Fatalf("err = %v, want ErrMalformed for SpawnInvuln in Phase 2", err)
 	}
 }
 

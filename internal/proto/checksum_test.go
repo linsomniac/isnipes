@@ -15,7 +15,7 @@ var updateGolden = flag.Bool("update", false, "regenerate golden testdata files"
 func TestSchemaChecksumValue(t *testing.T) {
 	wantPath := filepath.Join("..", "..", "testdata", "proto", "checksum.txt")
 	if *updateGolden {
-		text := fmt.Sprintf("0x%08X\n", SchemaChecksum)
+		text := fmt.Sprintf("0x%08X\n", SchemaChecksum())
 		if err := os.WriteFile(wantPath, []byte(text), 0o644); err != nil {
 			t.Fatalf("write: %v", err)
 		}
@@ -30,7 +30,7 @@ func TestSchemaChecksumValue(t *testing.T) {
 	if len(want) > 0 && want[len(want)-1] == '\n' {
 		want = want[:len(want)-1]
 	}
-	got := fmt.Sprintf("0x%08X", SchemaChecksum)
+	got := fmt.Sprintf("0x%08X", SchemaChecksum())
 	if want != got {
 		t.Fatalf("schemaChecksum: want %s, got %s", want, got)
 	}
@@ -39,8 +39,8 @@ func TestSchemaChecksumValue(t *testing.T) {
 func TestSchemaChecksumIsLittleEndianBytes0To3(t *testing.T) {
 	sum := sha256.Sum256([]byte(SchemaDescriptor()))
 	want := uint32(sum[0]) | uint32(sum[1])<<8 | uint32(sum[2])<<16 | uint32(sum[3])<<24
-	if SchemaChecksum != want {
-		t.Fatalf("checksum = %08x, want %08x (LE bytes 0..3)", SchemaChecksum, want)
+	if SchemaChecksum() != want {
+		t.Fatalf("checksum = %08x, want %08x (LE bytes 0..3)", SchemaChecksum(), want)
 	}
 }
 

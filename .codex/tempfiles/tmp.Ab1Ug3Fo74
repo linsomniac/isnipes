@@ -1,0 +1,13 @@
+**Findings**
+
+- **Medium:** `DecodeFrame` accepts trailing bytes in a single WS message. It returns `consumed` but no error when `len(src) > 8 + hdr.Len` (`internal/proto/frame.go:78`). PHASE2 says one WS message is one app frame and payload is exactly `len` bytes (`PHASE2.md:288`, `PHASE2.md:304`, `PHASE2.md:306`). The test plan explicitly expects this malformed case to fail (`PHASE2.md:972`). Unless every caller checks `consumed == len(msg)`, oversized/tacked-on bytes are silently accepted.
+
+- **Medium:** `Entity` byte size is spec-ambiguous: PHASE2 says 21 bytes (`PHASE2.md:417`), while the field list and implementation are 20 bytes (`internal/proto/proto.go:91`). Since `schemaDescriptor` lists fields but not the byte count (`internal/proto/checksum.go:17`), a TS implementation following the prose could encode 21-byte entities with the same checksum. Fix the spec and consider adding the entity size to the descriptor.
+
+- **Medium:** `SchemaChecksum` is an exported mutable `var` (`internal/proto/checksum.go:30`). PHASE2 calls this a compile-time constant (`PHASE2.md:57`), and this value gates version compatibility. Any internal package or test can accidentally mutate it at runtime. Prefer an unexported computed value plus accessor, or a generated literal constant checked against the descriptor hash.
+
+- **Low/Medium:** Several Phase 2 invariants are not enforced by encoders/decoders. Snapshot permits unsorted entities and `FlagSpawnInvuln`/reserved bits (`internal/proto/messages.go:84`, `internal/proto/messages.go:110`) despite PHASE2 requiring ascending IDs and only `{FlagDead, FlagTurbo}` (`PHASE2.md:441`). `MapInit` accepts any `packing` and any tile length (`internal/proto/messages.go:287`, `internal/proto/messages.go:301`) even though Phase 2 requires `packing = 1` (`PHASE2.md:522`). These should either be validated here or explicitly assigned to higher-level builders.
+
+**Tests**
+
+`go test ./internal/proto` passes.

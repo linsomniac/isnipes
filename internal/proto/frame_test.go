@@ -66,6 +66,18 @@ func TestEncodeFrameRejectsTooLong(t *testing.T) {
 	}
 }
 
+func TestFrameRejectsTrailingBytes(t *testing.T) {
+	hdr := FrameHeader{Type: MsgInput, Len: 5}
+	buf, err := EncodeFrame(nil, hdr, []byte{1, 2, 3, 4, 5})
+	if err != nil {
+		t.Fatal(err)
+	}
+	buf = append(buf, 0xFF) // tack on a stray byte
+	if _, _, _, err := DecodeFrame(buf); !errors.Is(err, ErrMalformed) {
+		t.Fatalf("err = %v, want ErrMalformed", err)
+	}
+}
+
 func TestFrameHeaderEmptyPayload(t *testing.T) {
 	hdr := FrameHeader{Type: MsgPing, Seq: 5, Ack: AckNone, Len: 0}
 	buf, err := EncodeFrame(nil, hdr, nil)

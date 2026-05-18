@@ -56,14 +56,17 @@ func EncodeFrame(dst []byte, hdr FrameHeader, payload []byte) ([]byte, error) {
 	return dst, nil
 }
 
-// DecodeFrame parses a frame from src, returning the header, the
-// payload slice (which aliases src — copy if you need to retain it
-// past src's lifetime), and the number of bytes consumed.
+// DecodeFrame parses one binary frame from a WS message. The caller
+// passes the entire WS message bytes; the function enforces PHASE2 §6.1
+// "one WS message = one app frame" by rejecting trailing bytes.
+//
+// Returns the header, the payload slice (which aliases src — copy if
+// you need to retain it past src's lifetime), and the number of bytes
+// consumed (always == len(src) on success).
 //
 // ErrTruncated: src is shorter than FrameHeaderLen, or shorter than
 // FrameHeaderLen + header.Len.
-// ErrMalformed: header.Len > MaxFrameLen (impossible since Len is u16,
-// but the constant lives in this package for clarity).
+// ErrMalformed: trailing bytes beyond FrameHeaderLen + header.Len.
 func DecodeFrame(src []byte) (FrameHeader, []byte, int, error) {
 	if len(src) < FrameHeaderLen {
 		return FrameHeader{}, nil, 0, ErrTruncated
@@ -78,6 +81,9 @@ func DecodeFrame(src []byte) (FrameHeader, []byte, int, error) {
 	end := FrameHeaderLen + int(hdr.Len)
 	if len(src) < end {
 		return FrameHeader{}, nil, 0, ErrTruncated
+	}
+	if len(src) > end {
+		return FrameHeader{}, nil, 0, ErrMalformed
 	}
 	return hdr, src[FrameHeaderLen:end], end, nil
 }

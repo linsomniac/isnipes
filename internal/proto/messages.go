@@ -81,9 +81,22 @@ type Snapshot struct {
 
 const snapshotPrefixLen = 4 + 2 + 4 + 1 // = 11
 
+// allowedSnapshotFlagBits enumerates the only Flag bits a Phase 2
+// server may emit on a Snapshot entity (§6.3.3 invariant).
+const allowedSnapshotFlagBits = FlagDead | FlagTurbo
+
 func (m Snapshot) Encode(dst []byte) ([]byte, error) {
 	if len(m.Entities) > MaxEntitiesPerSnapshot {
 		return nil, ErrMalformed
+	}
+	// §6.3.3 invariants: ascending EntityID, only {FlagDead, FlagTurbo}.
+	for i, e := range m.Entities {
+		if i > 0 && e.ID <= m.Entities[i-1].ID {
+			return nil, ErrMalformed
+		}
+		if e.Flags&^allowedSnapshotFlagBits != 0 {
+			return nil, ErrMalformed
+		}
 	}
 	var prefix [snapshotPrefixLen]byte
 	putLE32(prefix[0:4], m.ServerTick)
