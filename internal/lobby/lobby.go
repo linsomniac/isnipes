@@ -278,6 +278,13 @@ func (l *Lobby) handleMessage(v ctlMessage) {
 			return
 		}
 		l.handleChat(s, c)
+	case proto.LobbyKick:
+		var k proto.LobbyKickPayload
+		if err := jsonUnmarshal(env.D, &k); err != nil {
+			l.sendError(s, proto.LobbyErrBadRequest, err.Error())
+			return
+		}
+		l.handleKick(s, k)
 	default:
 		l.sendError(s, proto.LobbyErrBadRequest, "unknown type: "+env.T)
 	}
@@ -460,11 +467,12 @@ func (l *Lobby) handleStartMatch(s *Session, sm proto.StartMatch) {
 		})
 		// Record in lobby's token map for tracking + janitor TTL.
 		l.tokens[tok] = &pendingMatchJoin{
-			Token:    tok,
-			MatchID:  matchID,
-			PlayerID: eid,
-			Nick:     nick,
-			IssuedAt: l.clock(),
+			Token:     tok,
+			MatchID:   matchID,
+			SessionID: SessionID(pidStr),
+			PlayerID:  eid,
+			Nick:      nick,
+			IssuedAt:  l.clock(),
 		}
 	}
 	// Create the match.
