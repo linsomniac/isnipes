@@ -29,7 +29,7 @@ type projHit struct {
 // the full axis-separated sweep with fraction tracking, but the
 // approximation is within 1 subtile and the §10.2 "wall preferred on
 // tie" rule still applies via the ≤ comparison below.
-func resolveProjectile(m *maze, proj *Entity, shooterID EntityID, candidates []*Entity) projHit {
+func resolveProjectile(m *maze, proj *Entity, shooterID EntityID, shooterKind EntityKind, candidates []*Entity) projHit {
 	x0, y0 := proj.X, proj.Y
 	vx, vy := int32(proj.VX), int32(proj.VY)
 	he := int32(projectileHalfExt)
@@ -72,6 +72,13 @@ func resolveProjectile(m *maze, proj *Entity, shooterID EntityID, candidates []*
 		}
 		// Spawn-invuln targets cannot be hit (Phase 3 §12.2).
 		if e.Flags&FlagSpawnInvuln != 0 {
+			continue
+		}
+		// Phase 3 §12.1: a snipe-fired projectile does not damage
+		// other snipes or generators (its own lineage). We detect
+		// "snipe-fired" by the projectileState lookup; resolveProjectile
+		// receives shooterKind as a hint.
+		if shooterKind == KindSnipe && (e.Kind == KindSnipe || e.Kind == KindGenerator) {
 			continue
 		}
 		eHe := entityHalfExt(e.Kind)

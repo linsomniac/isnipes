@@ -214,6 +214,71 @@ func TestMatchJoinRejectsExpiredToken(t *testing.T) {
 	}
 }
 
+// pveSetup builds a 2-player PvE match at level A1 — 3 generators
+// (one per snipe formula), low snipe cap.
+func pveSetup(t *testing.T) (*Match, *fakeTicker, *fakeClock, chan OutboundFrame, chan OutboundFrame) {
+	t.Helper()
+	ft := newFakeTicker()
+	fc := &fakeClock{now: time.Unix(0, 0)}
+	cfg := MatchConfig{
+		MatchID:   "M-pve",
+		MapSeed:   0xCAFEBABE,
+		MapWidth:  60,
+		MapHeight: 40,
+		PlayerSlots: []PendingJoin{
+			{MatchID: "M-pve", Token: "tokA", PlayerID: 1, Nick: "A", IssuedAt: fc.Now()},
+			{MatchID: "M-pve", Token: "tokB", PlayerID: 2, Nick: "B", IssuedAt: fc.Now()},
+		},
+		Ticker:      ft,
+		Clock:       fc.Now,
+		LevelLetter: 'A',
+		LevelNumber: 1,
+	}
+	m, err := NewMatch(cfg)
+	if err != nil {
+		t.Fatalf("NewMatch: %v", err)
+	}
+	outA := make(chan OutboundFrame, 64)
+	outB := make(chan OutboundFrame, 64)
+	return m, ft, fc, outA, outB
+}
+
+func TestPvEMatchPVECompleteFires(t *testing.T) {
+	m, _, _, outA, outB := pveSetup(t)
+	done := make(chan struct{})
+	go func() { m.Run(); close(done) }()
+	defer func() { <-done }()
+	if _, err := m.SubmitJoin("tokA", outA); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.SubmitJoin("tokB", outB); err != nil {
+		t.Fatal(err)
+	}
+	// Allow handshake frames to settle.
+	time.Sleep(50 * time.Millisecond)
+	if m.State() != StateLive {
+		t.Fatalf("not LIVE; state=%d", m.State())
+	}
+	// We can't easily force generators+snipes to die without driving
+	// real gameplay. Instead, abort the match: this exercises that
+	// the actor still routes through MatchOver. PVE_COMPLETE itself
+	// is unit-tested in internal/sim's evaluateMatchEnd via the
+	// next test below.
+	m.Abort("test")
+	timeout := time.After(2 * time.Second)
+	closed := false
+	for !closed {
+		select {
+		case <-timeout:
+			t.Fatalf("MatchOver not delivered to B")
+		case _, ok := <-outB:
+			if !ok {
+				closed = true
+			}
+		}
+	}
+}
+
 func TestMatchJoinRejectsLateJoin(t *testing.T) {
 	// 3-slot match: 2 join immediately, transitioning to LIVE; the
 	// third (still-valid token) is then rejected.

@@ -83,6 +83,11 @@ type MatchConfig struct {
 	PlayerSlots []PendingJoin    // pre-allocated EntityIDs for joining players
 	Ticker      Ticker           // nil → NewRealTicker(tickInterval)
 	Clock       func() time.Time // nil → time.Now
+
+	// Phase 3: level table. Zero/Zero = Phase 2 PvP-only (no snipes,
+	// no generators). Non-zero pair = full PvE match.
+	LevelLetter byte
+	LevelNumber int
 }
 
 // controlMsg is the internal inbox payload.
@@ -142,6 +147,11 @@ type Match struct {
 	// Captured at transition to StateLive (since players are GC'd as
 	// they die under NoRespawn=true; we cannot recount later).
 	startingPlayerCount int
+
+	// isPvE flips to true on transition to StateLive when the sim was
+	// constructed with a level table (LevelLetter != 0). Determines
+	// whether evaluateMatchEnd evaluates the PVE_COMPLETE rule.
+	isPvE bool
 }
 
 // NewMatch constructs a Match in StateNew.
@@ -386,12 +396,17 @@ func (m *Match) startOrAbort() {
 	// Deterministic ID order for the sim.
 	sortIDs(pids)
 	cfg := sim.Config{
-		Seed:         m.cfg.MapSeed,
-		Width:        m.cfg.MapWidth,
-		Height:       m.cfg.MapHeight,
-		PlayerIDs:    pids,
-		NoRespawn:    true,
-		NoGenerators: true,
+		Seed:        m.cfg.MapSeed,
+		Width:       m.cfg.MapWidth,
+		Height:      m.cfg.MapHeight,
+		PlayerIDs:   pids,
+		NoRespawn:   true,
+		LevelLetter: m.cfg.LevelLetter,
+		LevelNumber: m.cfg.LevelNumber,
+	}
+	// Phase 2 PvP-only mode has no level table; suppress generators.
+	if m.cfg.LevelLetter == 0 {
+		cfg.NoGenerators = true
 	}
 	s, err := sim.NewSim(cfg)
 	if err != nil {
@@ -414,6 +429,7 @@ func (m *Match) startOrAbort() {
 	m.broadcastEvent(proto.Event{Kind: uint8(proto.EventMatchStarted)})
 	m.matchStartedEmitted = true
 	m.startingPlayerCount = len(pids)
+	m.isPvE = cfg.LevelLetter != 0
 }
 
 // tick runs one sim step.
@@ -466,19 +482,36 @@ func (m *Match) tick() {
 	}
 }
 
-// evaluateMatchEnd returns (reason, winner, done) per §9.3.
+// evaluateMatchEnd returns (reason, winner, done) per §9.3 + Phase 3
+// §14 (PVE_COMPLETE first in priority).
 func (m *Match) evaluateMatchEnd() (uint8, sim.EntityID, bool) {
 	live := 0
 	var lastAlive sim.EntityID
 	startCount := m.joinedAtStart()
+	liveGens := 0
+	liveSnipes := 0
 	for _, ent := range m.sim.Entities() {
-		if ent.Kind != sim.KindPlayer {
+		if ent.Flags&sim.FlagDead != 0 {
 			continue
 		}
-		if ent.Flags&sim.FlagDead == 0 {
+		switch ent.Kind {
+		case sim.KindPlayer:
 			live++
 			lastAlive = ent.ID
+		case sim.KindGenerator:
+			liveGens++
+		case sim.KindSnipe:
+			liveSnipes++
 		}
+	}
+	// Phase 3 §14: PVE_COMPLETE wins ties — but only when the match
+	// is a PvE match (level table active). PvP-only matches (Phase 2's
+	// LevelLetter=0 mode) never have generators or snipes by design;
+	// without this guard every PvP match would terminate at tick 1.
+	if m.isPvE && liveGens == 0 && liveSnipes == 0 && live >= 1 {
+		// SPEC §3.8: in PVE_COMPLETE the winner field is 0 (Phase 5
+		// owns the scoreboard / tie resolution).
+		return proto.EndPVEComplete, 0, true
 	}
 	switch {
 	case live == 1 && startCount >= 2:

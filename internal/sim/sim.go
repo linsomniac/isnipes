@@ -405,10 +405,15 @@ func (s *Sim) Tick(inputs []PlayerInput) ([]Event, error) {
 		proj := &s.store.slots[idx]
 		projState := s.store.projectiles[pid]
 		shooterID := projState.shooterID
+		// Look up shooter's kind for the §12.1 friendly-fire matrix.
+		shooterKind := EntityKind(0)
+		if sIdx := s.store.findByID(shooterID); sIdx >= 0 {
+			shooterKind = s.store.slots[sIdx].Kind
+		}
 		// Build candidates fresh each projectile (other entities may
 		// have died earlier in this step).
 		candidates := s.collectHitCandidates()
-		res := resolveProjectile(s.maze, proj, shooterID, candidates)
+		res := resolveProjectile(s.maze, proj, shooterID, shooterKind, candidates)
 		switch res.kind {
 		case projHitNone:
 			proj.X, proj.Y = res.endX, res.endY
