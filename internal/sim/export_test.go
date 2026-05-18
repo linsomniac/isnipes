@@ -1,5 +1,45 @@
 package sim
 
+// SpawnSnipeForTest spawns a snipe at the given tile centre, with the
+// given parent generator ID (use 0 for "no parent" in test fixtures).
+// Returns the snipe's EntityID.
+func SpawnSnipeForTest(s *Sim, parentGen EntityID, tx, ty int) EntityID {
+	id, ok := s.spawnSnipeAt(parentGen,
+		int32(tx*subtilePerTile+subtilePerTile/2),
+		int32(ty*subtilePerTile+subtilePerTile/2),
+		tx, ty)
+	if !ok {
+		panic("SpawnSnipeForTest: alloc failed")
+	}
+	return id
+}
+
+// SnipeStateForTest returns the AI state of a snipe by ID.
+func SnipeStateForTest(s *Sim, id EntityID) (SnipeStateInfo, bool) {
+	return s.snipeStateInfoFor(id)
+}
+
+// LiveSnipeIDsForTest returns IDs of all live snipes.
+func LiveSnipeIDsForTest(s *Sim) []EntityID {
+	var out []EntityID
+	for i := range s.store.slots {
+		e := &s.store.slots[i]
+		if e.ID != 0 && e.Kind == KindSnipe && e.Flags&FlagDead == 0 {
+			out = append(out, e.ID)
+		}
+	}
+	return out
+}
+
+// GeneratorEmitCooldownForTest reads a generator's per-tick cooldown.
+func GeneratorEmitCooldownForTest(s *Sim, id EntityID) (uint16, bool) {
+	gs, ok := s.store.generators[id]
+	if !ok {
+		return 0, false
+	}
+	return gs.emitCooldown, true
+}
+
 // ForceExhaustedForTest puts the sim into a state where the next
 // entity-ID allocation will fail. Used by TestTickReturnsErrIDExhausted.
 //

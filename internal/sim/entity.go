@@ -33,6 +33,8 @@ type entityStore struct {
 	// look-up by key (§12 determinism rules).
 	players     map[EntityID]*playerState
 	projectiles map[EntityID]*projectileState
+	snipes      map[EntityID]*snipeState     // Phase 3
+	generators  map[EntityID]*generatorState // Phase 3
 	nextID      EntityID
 }
 
@@ -40,6 +42,8 @@ func newEntityStore(initialNextID EntityID) *entityStore {
 	return &entityStore{
 		players:     make(map[EntityID]*playerState),
 		projectiles: make(map[EntityID]*projectileState),
+		snipes:      make(map[EntityID]*snipeState),
+		generators:  make(map[EntityID]*generatorState),
 		nextID:      initialNextID,
 	}
 }
@@ -87,6 +91,8 @@ func (es *entityStore) remove(id EntityID) {
 	}
 	delete(es.players, id)
 	delete(es.projectiles, id)
+	delete(es.snipes, id)
+	delete(es.generators, id)
 	es.slots[idx] = Entity{}
 }
 

@@ -113,6 +113,8 @@ func entityHalfExt(k EntityKind) int32 {
 		return generatorHalfExt
 	case KindProjectile:
 		return projectileHalfExt
+	case KindSnipe:
+		return snipeHalfExt
 	}
 	return 0
 }

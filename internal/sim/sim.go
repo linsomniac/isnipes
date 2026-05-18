@@ -63,12 +63,20 @@ func NewSim(cfg Config) (*Sim, error) {
 		s.store.players[pid] = &playerState{lastDir: DirIdle}
 	}
 
-	// Allocate generators in tile row-major order.
+	// Allocate generators in tile row-major order. When a level is
+	// active, generator HP comes from the level table (§6.1) and each
+	// gets a per-gen emission cooldown jittered into the §11.2 range.
 	if !cfg.NoGenerators {
 		// res.generatorTiles is in acceptance order, not row-major;
 		// sort row-major for stable allocation.
 		gens := append([]tilePos(nil), res.generatorTiles...)
 		sortTilesRowMajor(gens, res.m.W)
+		genHP := uint8(generatorHP)
+		levelActive := cfg.LevelLetter != 0
+		if levelActive {
+			lp := LookupLevel(cfg.LevelLetter, cfg.LevelNumber)
+			genHP = lp.GeneratorHP
+		}
 		for _, g := range gens {
 			id, ok := s.store.allocID()
 			if !ok {
@@ -78,11 +86,23 @@ func NewSim(cfg Config) (*Sim, error) {
 			s.store.slots[idx] = Entity{
 				ID:     id,
 				Kind:   KindGenerator,
-				HP:     generatorHP,
+				HP:     genHP,
 				Facing: DirS,
 				Flags:  0,
 				X:      int32(g.X*subtilePerTile + subtilePerTile/2),
 				Y:      int32(g.Y*subtilePerTile + subtilePerTile/2),
+			}
+			if levelActive {
+				// Per-generator initial cooldown jittered in
+				// [emitCooldownMin, emitCooldownMax] using its own
+				// per-entity PRNG. Rotation derives from EntityID
+				// mod 8 (§11.1).
+				r := s.entityPRNGs.rand(id)
+				cooldown := emitCooldownMin + uint16(r.IntN(int(emitCooldownMax-emitCooldownMin+1)))
+				s.store.generators[id] = &generatorState{
+					emitCooldown: cooldown,
+					rotation:     uint8(id % 8),
+				}
 			}
 		}
 	}
@@ -314,6 +334,56 @@ func (s *Sim) Tick(inputs []PlayerInput) ([]Event, error) {
 		e.X, e.Y = nx, ny
 		e.VX, e.VY = int16(nvx), int16(nvy)
 	}
+
+	// Step 4.5: snipe AI pass (ID-sorted). Updates each snipe's
+	// velocity + AI state; may emit entity_spawn for fire events.
+	for _, id := range s.store.liveIDsSorted() {
+		idx := s.store.findByID(id)
+		if idx < 0 {
+			continue
+		}
+		e := &s.store.slots[idx]
+		if e.Kind != KindSnipe || e.Flags&FlagDead != 0 {
+			continue
+		}
+		ss := s.store.snipes[id]
+		if ss == nil {
+			continue
+		}
+		newEvents := s.stepSnipeAI(e, ss)
+		events = append(events, newEvents...)
+	}
+
+	// Step 4.55: move snipes (wall + generator solids; snipe-vs-snipe
+	// weak block applied after).
+	for _, id := range s.store.liveIDsSorted() {
+		idx := s.store.findByID(id)
+		if idx < 0 {
+			continue
+		}
+		e := &s.store.slots[idx]
+		if e.Kind != KindSnipe || e.Flags&FlagDead != 0 {
+			continue
+		}
+		ss := s.store.snipes[id]
+		if ss == nil {
+			continue
+		}
+		if e.VX == 0 && e.VY == 0 {
+			ss.wallBlockedAt = false
+			continue
+		}
+		nx, ny, nvx, nvy := moveAndSlide(s.maze, e.X, e.Y, int32(e.VX), int32(e.VY), snipeHalfExt, solids)
+		ss.wallBlockedAt = (nvx == 0 && int32(e.VX) != 0) || (nvy == 0 && int32(e.VY) != 0)
+		e.X, e.Y = nx, ny
+		e.VX, e.VY = int16(nvx), int16(nvy)
+	}
+
+	// Step 4.56: snipe-vs-snipe weak block (§10.7).
+	s.applySnipeWeakBlock()
+
+	// Step 4.6: generator emission (ID-sorted). Iter 4 will populate.
+	events = append(events, s.stepGeneratorsEmission()...)
 
 	// Step 5: resolve projectile motion + collision (ID-sorted).
 	// Build candidates: every live, non-projectile entity.
