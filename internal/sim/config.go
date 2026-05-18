@@ -19,7 +19,7 @@ const (
 	KindPlayer     EntityKind = 1
 	KindGenerator  EntityKind = 2
 	KindProjectile EntityKind = 3
-	// KindSnipe = 4 reserved for Phase 3.
+	KindSnipe      EntityKind = 4 // Phase 3
 )
 
 // Direction codes match the Dir8 enum in §4.3.2.
@@ -93,7 +93,8 @@ const (
 	EventRespawnPending     uint8 = 0x0D
 )
 
-// Config governs NewSim. See §5.
+// Config governs NewSim. See §5 of PHASE1.md (Phase 1 fields) and §5
+// of PHASE3.md (Phase 3 Level fields).
 type Config struct {
 	Seed         uint32
 	Width        int // 30..120
@@ -101,6 +102,14 @@ type Config struct {
 	PlayerIDs    []EntityID
 	NoRespawn    bool
 	NoGenerators bool
+
+	// LevelLetter is 'A'..'Z' (canonicalised upper). The zero value
+	// (byte 0) means "Phase 1 defaults: no snipes, no level-table
+	// parameters". Phase 2's PvP-only match passes 0/0.
+	LevelLetter byte
+	// LevelNumber is 1..9. Must be set whenever LevelLetter is set;
+	// mismatches return ErrInvalidLevel from NewSim.
+	LevelNumber int
 }
 
 // §7.0 phase-1 fixed parameters.
@@ -151,6 +160,7 @@ var (
 	ErrDuplicatePlayerID  = errors.New("isnipes/sim: Config.PlayerIDs contains duplicates")
 	ErrPlayerIDNoHeadroom = errors.New("isnipes/sim: Config.PlayerIDs exceeds the §8 headroom bound")
 	ErrInvalidMapSize     = errors.New("isnipes/sim: Config.Width/Height outside [30..120] × [20..80]")
+	ErrInvalidLevel       = errors.New("isnipes/sim: Config.LevelLetter / LevelNumber out of range or only one set")
 )
 
 // ErrIDExhausted indicates EntityID space exhaustion (§8).

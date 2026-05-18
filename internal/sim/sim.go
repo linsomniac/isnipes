@@ -117,6 +117,14 @@ func validateConfig(cfg *Config) error {
 			return ErrPlayerIDNoHeadroom
 		}
 	}
+	// Phase 3 level table validation.
+	if err := validateLevel(cfg.LevelLetter, cfg.LevelNumber); err != nil {
+		return err
+	}
+	// Canonicalise letter to upper for downstream consumers.
+	if cfg.LevelLetter >= 'a' && cfg.LevelLetter <= 'z' {
+		cfg.LevelLetter -= 32
+	}
 	return nil
 }
 
