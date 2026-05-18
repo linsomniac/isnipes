@@ -41,6 +41,11 @@ const (
 	LobbyErrRoomGone      = "ROOM_GONE"
 	LobbyErrAlreadyInRoom = "ALREADY_IN_ROOM"
 	LobbyErrNoOpponent    = "NO_OPPONENT"
+	LobbyErrBadLevel      = "BAD_LEVEL"     // Phase 6 §8.1
+	LobbyErrNotInRoom     = "NOT_IN_ROOM"   // Phase 6 §6.2
+	LobbyErrTextTooLong   = "TEXT_TOO_LONG" // Phase 6 §6.2
+	LobbyErrRateLimited   = "RATE_LIMITED"  // Phase 6 §6.2
+	LobbyErrKicked        = "KICKED"        // Phase 6 §7.1
 )
 
 // Hello payload (C→S).

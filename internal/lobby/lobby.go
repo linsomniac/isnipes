@@ -318,13 +318,19 @@ func (l *Lobby) handleCreateRoom(s *Session, c proto.CreateRoom) {
 		l.sendError(s, proto.LobbyErrBadRequest, "max out of range")
 		return
 	}
+	// Phase 6 §8.1: level validation.
+	letter, num, err := ValidateLevel(c.Level)
+	if err != nil {
+		l.sendError(s, proto.LobbyErrBadLevel, "level must be A-Z × 1-9")
+		return
+	}
 	id := newRoomID()
 	room := &Room{
 		ID:      id,
 		Name:    strings.TrimSpace(c.Name),
 		Host:    string(s.ID),
 		Max:     c.Max,
-		Level:   c.Level,
+		Level:   proto.Level{Letter: string(letter), Number: num},
 		State:   RoomOpen,
 		Members: []string{string(s.ID)},
 	}
