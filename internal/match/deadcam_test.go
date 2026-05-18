@@ -71,6 +71,29 @@ func TestDeadCamSnapshotIsUnfiltered(t *testing.T) {
 	}
 }
 
+// TestDeadCamSnapshotEncodesCleanly — codex iter3 finding. The
+// dead-cam path sorts by distance from map centre to pick the nearest
+// 64; the resulting array MUST still be ID-ascending to satisfy
+// proto.Snapshot.Encode's §6.3.3 invariant (else sendFrameTo aborts
+// the match on encode error).
+func TestDeadCamSnapshotEncodesCleanly(t *testing.T) {
+	m := newPvEMatchForEval(t)
+	killPlayerUntilEliminated(t, m, 1, 0)
+	m.slots[1].DeadCam = true
+	snap := m.buildSnapshotFor(1)
+	// Direct invariant check.
+	for i := 1; i < len(snap.Entities); i++ {
+		if snap.Entities[i].ID <= snap.Entities[i-1].ID {
+			t.Fatalf("entry %d (id=%d) ≤ entry %d (id=%d) — wire ordering broken",
+				i, snap.Entities[i].ID, i-1, snap.Entities[i-1].ID)
+		}
+	}
+	// Encode round-trip — the encoder is the canonical check.
+	if _, err := snap.Encode(nil); err != nil {
+		t.Fatalf("dead-cam snapshot failed to encode: %v", err)
+	}
+}
+
 // TestDeadCamFilterDropsInput — handleControl on a dead-cam slot
 // silently drops ctlInput.
 func TestDeadCamFilterDropsInput(t *testing.T) {

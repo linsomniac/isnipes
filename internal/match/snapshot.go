@@ -104,6 +104,10 @@ func (m *Match) buildDeadCamSnapshotFor(recipient sim.EntityID) proto.Snapshot {
 	if len(cands) > proto.MaxEntitiesPerSnapshot {
 		cands = cands[:proto.MaxEntitiesPerSnapshot]
 	}
+	// Phase 5 codex P5/iter3 fix: §6.3.3 demands strictly-ascending
+	// EntityID on the wire. Distance is the *selection* criterion;
+	// after the cap-truncation, restore ID order before emitting.
+	sort.Slice(cands, func(i, j int) bool { return cands[i].ent.ID < cands[j].ent.ID })
 	wire := make([]proto.Entity, 0, len(cands))
 	for _, c := range cands {
 		e := c.ent
