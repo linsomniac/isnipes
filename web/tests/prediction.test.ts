@@ -249,6 +249,28 @@ describe("stepPlayer deterministic mirror", () => {
     expect(out.x).toBe(c.x + 32);
   });
 
+  test("turbo locks direction (codex sweep #3)", () => {
+    // Mirror Go's internal/sim/sim.go::TestTurboStrictLock contract.
+    const c = tileCentre(10, 10);
+    let s = { x: c.x, y: c.y, vx: 0, vy: 0, halfExt: PLAYER_HALF_EXT, lastDir: 0 as any };
+    // Tick 1: turbo + E. Now locked to E.
+    s = stepPlayer(s, { dir: Dir.E, turbo: true }, allFloorMaze(), []);
+    expect(s.lastDir).toBe(Dir.E);
+    const afterE = s.x;
+    // Tick 2: turbo + W. Should STILL move east because lock holds.
+    s = stepPlayer(s, { dir: Dir.W, turbo: true }, allFloorMaze(), []);
+    expect(s.x).toBeGreaterThan(afterE);
+    expect(s.lastDir).toBe(Dir.E);
+    // Tick 3: release turbo + N. Lock cleared; moves N.
+    const beforeN = s.y;
+    s = stepPlayer(s, { dir: Dir.N, turbo: false }, allFloorMaze(), []);
+    expect(s.y).toBeLessThan(beforeN);
+    expect(s.lastDir).toBe(0);
+    // Tick 4: turbo + Idle cancels the lock without moving.
+    s = stepPlayer(s, { dir: Dir.Idle, turbo: true }, allFloorMaze(), []);
+    expect(s.lastDir).toBe(0);
+  });
+
   test("generator solid blocks east movement", () => {
     const c = tileCentre(10, 10);
     const init = makeInitialPlayer(c.x, c.y);

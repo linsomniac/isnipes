@@ -256,6 +256,44 @@ func TestLagCompGhostCandidateHitsRemovedEntity(t *testing.T) {
 	}
 }
 
+// TestLagCompGhostCandidateSkipsProjectiles: ghost-candidate path
+// must NOT enumerate historical projectiles. The live candidate
+// filter excludes KindProjectile; the ghost pass mirrors that.
+// PHASE4 codex sweep #4.
+func TestLagCompGhostCandidateSkipsProjectiles(t *testing.T) {
+	m := snapshotMaze()
+	ax, ay := tile(10, 10)
+	bx, by := tile(11, 10)
+	_ = ax
+	candidates := []*Entity{}
+	proj := &Entity{
+		ID: 99, Kind: KindProjectile, HP: 1,
+		X: bx - 96 - 24 - 8, Y: ay, VX: 32, VY: 0,
+	}
+	// A historical projectile entry on the line — must be skipped.
+	hist := &entityHistory{}
+	for i := uint32(1); i <= 20; i++ {
+		hist.write(i, bx, by, KindProjectile, 0)
+	}
+	allHist := map[EntityID]*entityHistory{42: hist}
+	lc := lagCompContext{
+		currentTick: 22, owtTicks: 2,
+		getHist: func(id EntityID) *entityHistory {
+			if id == 42 {
+				return hist
+			}
+			return nil
+		},
+		getAllHistories: func() map[EntityID]*entityHistory {
+			return allHist
+		},
+	}
+	res := resolveProjectile(m, proj, 1, KindPlayer, candidates, lc)
+	if res.kind == projHitEntity {
+		t.Fatalf("ghost pass should not hit historical projectiles")
+	}
+}
+
 // TestLagCompGhostCandidateSkipsDeadAtTview: ghost-candidate path
 // honors the FlagDead/FlagSpawnInvuln filter at T_view.
 func TestLagCompGhostCandidateSkipsDeadAtTview(t *testing.T) {

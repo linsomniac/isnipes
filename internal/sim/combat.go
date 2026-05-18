@@ -218,6 +218,11 @@ func lagCompGhostPass(
 		if s.flags&FlagSpawnInvuln != 0 {
 			continue
 		}
+		// Projectiles never lag-comp-hit each other (mirror the live
+		// candidate filter at collectHitCandidates). PHASE4 codex #4.
+		if s.kind == KindProjectile {
+			continue
+		}
 		// Ghost candidate is only valid for kinds with a real AABB.
 		eHe := entityHalfExt(s.kind)
 		if eHe == 0 {

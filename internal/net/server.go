@@ -192,53 +192,54 @@ func (s *Server) handleMatch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Phase 4 §7.1: server-initiated Ping at 2 Hz. The matching
-	// inbound Pong feeds match.SubmitPong → OWTEstimator.
-	go func() {
-		t := time.NewTicker(s.cfg.PingInterval)
-		defer t.Stop()
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case <-t.C:
-				now := uint32(time.Now().UnixMilli())
-				ping := proto.Ping{TsOrigin: now}
-				b, _ := ping.Encode(nil)
-				select {
-				case out <- match.OutboundFrame{Type: proto.MsgPing, Payload: b}:
-				default:
-					// backpressured; skip this ping
-				}
-			}
-		}
-	}()
-
-	// Writer goroutine.
+	// Writer goroutine. Phase 4 §7.1: integrates the server-initiated
+	// Ping ticker so writes are serialised through a single goroutine
+	// and `out` ownership stays exclusively with the match actor.
+	// Previous design ran the ping ticker as a separate goroutine
+	// that wrote into `out`, which could panic if the match actor
+	// closed `out` concurrently with a ticker fire (codex P4 #1).
 	go func() {
 		var seq uint16
-		for f := range out {
-			hdr := proto.FrameHeader{
-				Type: f.Type,
-				Seq:  seq,
-				Ack:  proto.AckNone,
-				Len:  uint16(len(f.Payload)),
-			}
+		ticker := time.NewTicker(s.cfg.PingInterval)
+		defer ticker.Stop()
+		writeFrame := func(t proto.MsgType, payload []byte) bool {
+			hdr := proto.FrameHeader{Type: t, Seq: seq, Ack: proto.AckNone, Len: uint16(len(payload))}
 			seq++
-			buf, err := proto.EncodeFrame(nil, hdr, f.Payload)
+			buf, err := proto.EncodeFrame(nil, hdr, payload)
 			if err != nil {
 				cancel()
-				return
+				return false
 			}
 			ctxW, ctxWCancel := context.WithTimeout(ctx, 2*time.Second)
 			err = c.Write(ctxW, websocket.MessageBinary, buf)
 			ctxWCancel()
 			if err != nil {
 				cancel()
+				return false
+			}
+			return true
+		}
+		for {
+			select {
+			case <-ctx.Done():
+				_ = c.Close(websocket.StatusNormalClosure, "ok")
 				return
+			case <-ticker.C:
+				ping := proto.Ping{TsOrigin: uint32(time.Now().UnixMilli())}
+				b, _ := ping.Encode(nil)
+				if !writeFrame(proto.MsgPing, b) {
+					return
+				}
+			case f, ok := <-out:
+				if !ok {
+					_ = c.Close(websocket.StatusNormalClosure, "ok")
+					return
+				}
+				if !writeFrame(f.Type, f.Payload) {
+					return
+				}
 			}
 		}
-		_ = c.Close(websocket.StatusNormalClosure, "ok")
 	}()
 
 	// Reader loop.

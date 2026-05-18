@@ -51,6 +51,10 @@ export interface PlayerKinematic {
   vx: number;
   vy: number;
   halfExt: number;
+  // Phase 4 codex sweep #3: mirror internal/sim/playerState.lastDir
+  // so turbo locks direction even when the input dir changes
+  // mid-hold. lastDir == Dir.Idle means "turbo not engaged".
+  lastDir?: Dir;
 }
 
 export interface SolidAABB {
@@ -213,17 +217,44 @@ export interface ClientInputIntent {
 
 // stepPlayer applies one tick of input to a local player and returns
 // the next kinematic. Pure — no side effects, no PRNG.
+//
+// Mirrors internal/sim/sim.go turbo-lock semantics (§10.6 of SPEC):
+// while turbo is held, the direction locks to the first dir held;
+// changing dir while turbo is held does NOT change direction.
+// Turbo with Dir.Idle cancels the lock (§10.6 "turbo-cancel-via-idle").
 export function stepPlayer(
   prev: PlayerKinematic,
   inp: ClientInputIntent,
   maze: MazeView,
   solids: ReadonlyArray<SolidAABB>,
 ): PlayerKinematic {
-  const speed = inp.turbo ? PLAYER_TURBO_SPEED : PLAYER_SPEED;
-  const [vx, vy] = velocityFor(inp.dir, speed);
+  const prevLock = prev.lastDir ?? Dir.Idle;
+  let effectiveDir: Dir = inp.dir;
+  let nextLock: Dir = Dir.Idle;
+  if (inp.turbo && inp.dir !== Dir.Idle) {
+    if (prevLock === Dir.Idle) {
+      // First tick of turbo — lock to this dir.
+      effectiveDir = inp.dir;
+      nextLock = inp.dir;
+    } else {
+      // Already locked — preserve the locked dir regardless of input.
+      effectiveDir = prevLock;
+      nextLock = prevLock;
+    }
+  } else if (inp.turbo && inp.dir === Dir.Idle) {
+    // Turbo + idle cancels the lock.
+    effectiveDir = Dir.Idle;
+    nextLock = Dir.Idle;
+  } else {
+    // Turbo released.
+    effectiveDir = inp.dir;
+    nextLock = Dir.Idle;
+  }
+  const speed = inp.turbo && effectiveDir !== Dir.Idle ? PLAYER_TURBO_SPEED : PLAYER_SPEED;
+  const [vx, vy] = velocityFor(effectiveDir, speed);
   if (vx === 0 && vy === 0) {
-    return { x: prev.x, y: prev.y, vx: 0, vy: 0, halfExt: prev.halfExt };
+    return { x: prev.x, y: prev.y, vx: 0, vy: 0, halfExt: prev.halfExt, lastDir: nextLock };
   }
   const r = moveAndSlide(maze, prev.x, prev.y, vx, vy, prev.halfExt, solids);
-  return { x: r.x, y: r.y, vx: r.vx, vy: r.vy, halfExt: prev.halfExt };
+  return { x: r.x, y: r.y, vx: r.vx, vy: r.vy, halfExt: prev.halfExt, lastDir: nextLock };
 }

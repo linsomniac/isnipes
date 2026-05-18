@@ -147,5 +147,5 @@ export class PredictionBuffer {
 // makeInitialPlayer constructs the spawn kinematic given subtile
 // position. halfExt defaults to PLAYER_HALF_EXT.
 export function makeInitialPlayer(x: number, y: number): PlayerKinematic {
-  return { x, y, vx: 0, vy: 0, halfExt: PLAYER_HALF_EXT };
+  return { x, y, vx: 0, vy: 0, halfExt: PLAYER_HALF_EXT, lastDir: 0 };
 }
