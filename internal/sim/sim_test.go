@@ -102,6 +102,86 @@ func TestDeterminism_GoldenFingerprint(t *testing.T) {
 	}
 }
 
+// TestDeterminism_GoldenFingerprint_Level9 is the Phase 3 PvE golden
+// replay (§16.7). Single-player level T9 (Brutal + max scaling),
+// scripted inputs for 1200 ticks. Hash committed to
+// testdata/replays/phase3_pve.hash.
+func TestDeterminism_GoldenFingerprint_Level9(t *testing.T) {
+	cfg := Config{
+		Seed:        0x42424242,
+		Width:       60,
+		Height:      40,
+		PlayerIDs:   []EntityID{1},
+		LevelLetter: 'T',
+		LevelNumber: 9,
+	}
+	s, err := NewSim(cfg)
+	if err != nil {
+		t.Fatalf("NewSim: %v", err)
+	}
+	inputsPath := filepath.Join("testdata", "replays", "phase3_pve.inputs")
+	hashPath := filepath.Join("testdata", "replays", "phase3_pve.hash")
+
+	if *updateGolden {
+		inputs := generatePhase3Inputs()
+		if err := writeReplayInputs(inputsPath, inputs); err != nil {
+			t.Fatalf("write inputs: %v", err)
+		}
+		for _, tick := range inputs {
+			if _, err := s.Tick(tick); err != nil {
+				t.Fatalf("tick err: %v", err)
+			}
+		}
+		fp := s.Fingerprint()
+		if err := os.WriteFile(hashPath, []byte(hex.EncodeToString(fp[:])+"\n"), 0o644); err != nil {
+			t.Fatalf("write hash: %v", err)
+		}
+		return
+	}
+
+	inputs, err := readReplayInputs(inputsPath)
+	if err != nil {
+		t.Fatalf("read inputs: %v (run with -update)", err)
+	}
+	for i, tick := range inputs {
+		if _, err := s.Tick(tick); err != nil {
+			t.Fatalf("tick %d: %v", i, err)
+		}
+	}
+	wantHex, err := os.ReadFile(hashPath)
+	if err != nil {
+		t.Fatalf("read hash: %v", err)
+	}
+	want := string(wantHex)
+	if len(want) > 0 && want[len(want)-1] == '\n' {
+		want = want[:len(want)-1]
+	}
+	fp := s.Fingerprint()
+	got := hex.EncodeToString(fp[:])
+	if want != got {
+		t.Fatalf("fingerprint: want %s, got %s", want, got)
+	}
+}
+
+// generatePhase3Inputs scripts 1200 ticks of single-player PvE action
+// (movement + occasional fire). Inputs are deterministic.
+func generatePhase3Inputs() [][]PlayerInput {
+	const totalTicks = 1200
+	out := make([][]PlayerInput, totalTicks)
+	for i := 0; i < totalTicks; i++ {
+		out[i] = []PlayerInput{
+			{
+				PlayerID:   1,
+				Dir:        Dir((i % 8) + 1),
+				Turbo:      i%17 == 0,
+				FireDir:    Dir(((i + 1) % 9)),
+				ClientTick: uint16(i),
+			},
+		}
+	}
+	return out
+}
+
 func generateBaselineInputs() [][]PlayerInput {
 	const totalTicks = 600
 	out := make([][]PlayerInput, totalTicks)

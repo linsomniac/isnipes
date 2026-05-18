@@ -114,8 +114,63 @@ func (s *Sim) Fingerprint() [32]byte {
 			putLE32(buf[:4], uint32(pst.shooterID))
 			h.Write(buf[:4])
 		} else {
-			// Generator: all unexported are zero.
+			// Generator / Snipe: pad the P1 player+projectile block.
 			h.Write(make([]byte, 1+1+2+4+4+4+2+4))
+		}
+
+		// Phase 3 §15.1: per-snipe + per-generator extension bytes.
+		// Emit zero-padded blocks for non-applicable kinds so the
+		// hash is stable across (a sim that has snipes/gens) and
+		// (a sim that doesn't).
+		if e.Kind == KindSnipe {
+			ss := s.store.snipes[id]
+			buf[0] = byte(ss.aiState)
+			h.Write(buf[:1])
+			putLE16(buf[:2], ss.aiTimer)
+			h.Write(buf[:2])
+			putLE32(buf[:4], ss.lastBFSTick)
+			h.Write(buf[:4])
+			pathLen := byte(len(ss.bfsPath))
+			if pathLen > 3 {
+				pathLen = 3
+			}
+			buf[0] = pathLen
+			h.Write(buf[:1])
+			for i := 0; i < int(pathLen); i++ {
+				buf[0] = byte(ss.bfsPath[i].X)
+				buf[1] = byte(ss.bfsPath[i].Y)
+				h.Write(buf[:2])
+			}
+			// Pad missing path entries with zeros.
+			for i := int(pathLen); i < 3; i++ {
+				h.Write([]byte{0, 0})
+			}
+			putLE32(buf[:4], uint32(ss.chaseTarget))
+			h.Write(buf[:4])
+			putLE16(buf[:2], ss.losLostTicks)
+			h.Write(buf[:2])
+			putLE16(buf[:2], ss.fireCooldown)
+			h.Write(buf[:2])
+			putLE32(buf[:4], uint32(ss.parentGen))
+			h.Write(buf[:4])
+		} else {
+			// Pad the snipe block: 1 + 2 + 4 + 1 + 3*2 + 4 + 2 + 2 + 4 = 26 bytes.
+			h.Write(make([]byte, 26))
+		}
+		if e.Kind == KindGenerator {
+			gs := s.store.generators[id]
+			var ec uint16
+			var rot uint8
+			if gs != nil {
+				ec = gs.emitCooldown
+				rot = gs.rotation
+			}
+			putLE16(buf[:2], ec)
+			h.Write(buf[:2])
+			buf[0] = rot
+			h.Write(buf[:1])
+		} else {
+			h.Write(make([]byte, 3))
 		}
 	}
 
