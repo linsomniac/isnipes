@@ -4,6 +4,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jafo/isnipes/internal/match"
 	"github.com/jafo/isnipes/internal/proto"
 )
 
@@ -81,6 +82,55 @@ func TestLobby_KickHost_SelfKickRejected(t *testing.T) {
 	}
 	if got.Payload.(proto.LobbyError).Code != proto.LobbyErrBadRequest {
 		t.Fatalf("code = %q, want BAD_REQUEST", got.Payload.(proto.LobbyError).Code)
+	}
+}
+
+// TestLobby_KickInvalidatesJoinToken — Phase 6 §7.3 + codex iter2/3
+// finding. After startMatch issues tokens, a kick on a member must
+// revoke that member's token at the match actor (not just lobby
+// bookkeeping); subsequent SubmitJoin with the revoked token returns
+// ErrAuth.
+func TestLobby_KickInvalidatesJoinToken(t *testing.T) {
+	l, _, done, _ := newTestLobby(t)
+	defer func() { l.Stop(); <-done }()
+	a, outA := connect(t, l)
+	helloAndDrain(t, l, a, outA, "Alice")
+	b, outB := connect(t, l)
+	helloAndDrain(t, l, b, outB, "Bob")
+	rid := createAndJoinRoom(t, l, a, b, outA, outB)
+
+	// Host starts the match — both members get matchStarted with tokens.
+	sendEnvelope(t, l, a.ID, proto.LobbyStartMatch, proto.StartMatch{RoomID: rid})
+	msA, ok := drainUntil(t, outA, proto.LobbyMatchStarted, 500*time.Millisecond)
+	if !ok {
+		t.Fatal("A no matchStarted")
+	}
+	msB, ok := drainUntil(t, outB, proto.LobbyMatchStarted, 500*time.Millisecond)
+	if !ok {
+		t.Fatal("B no matchStarted")
+	}
+	matchID := msA.Payload.(proto.MatchStarted).MatchID
+	bToken := msB.Payload.(proto.MatchStarted).JoinToken
+
+	// Host kicks B. Token should be revoked at the match actor.
+	sendEnvelope(t, l, a.ID, proto.LobbyKick, proto.LobbyKickPayload{
+		RoomID: rid, SessionID: string(b.ID),
+	})
+	if _, ok := drainUntil(t, outB, proto.LobbyKicked, 500*time.Millisecond); !ok {
+		t.Fatal("B no kicked envelope")
+	}
+	if l.cfg.Registry == nil {
+		t.Fatal("lobby has no registry")
+	}
+	mm, ok := l.cfg.Registry.Lookup(matchID)
+	if !ok || mm == nil {
+		t.Fatalf("match %s missing from registry", matchID)
+	}
+	// Some slack so the actor processes ctlRevokeToken before SubmitJoin.
+	time.Sleep(50 * time.Millisecond)
+	matchOut := make(chan match.OutboundFrame, 16)
+	if _, err := mm.SubmitJoin(bToken, matchOut); err == nil {
+		t.Fatal("SubmitJoin with revoked token succeeded; want ErrAuth")
 	}
 }
 

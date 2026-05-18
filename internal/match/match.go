@@ -143,6 +143,12 @@ type ctlClose struct {
 
 type ctlAbort struct{ Reason string }
 
+// Phase 6 §7.3 — lobby-initiated token revocation. Posted by the lobby
+// when a host kicks a member during STARTING (post-startMatch but
+// pre-MatchJoin). Deletes the token from bySession so a subsequent
+// MatchJoin returns ErrAuth → Close{4001 AUTH}.
+type ctlRevokeToken struct{ Token string }
+
 // Phase 5 §9 — DC + reconnect control messages.
 type ctlDC struct{ PlayerID sim.EntityID }
 type ctlReconnect struct {
@@ -151,13 +157,14 @@ type ctlReconnect struct {
 	Reply chan<- joinResult
 }
 
-func (ctlJoin) controlTag()      {}
-func (ctlInput) controlTag()     {}
-func (ctlPong) controlTag()      {}
-func (ctlClose) controlTag()     {}
-func (ctlAbort) controlTag()     {}
-func (ctlDC) controlTag()        {}
-func (ctlReconnect) controlTag() {}
+func (ctlJoin) controlTag()        {}
+func (ctlInput) controlTag()       {}
+func (ctlPong) controlTag()        {}
+func (ctlClose) controlTag()       {}
+func (ctlAbort) controlTag()       {}
+func (ctlDC) controlTag()          {}
+func (ctlReconnect) controlTag()   {}
+func (ctlRevokeToken) controlTag() {}
 
 // Match is the actor. Construct with NewMatch and run via Run().
 type Match struct {
@@ -320,6 +327,17 @@ func (m *Match) SubmitReconnect(token string, out chan<- OutboundFrame) (sim.Ent
 	return r.PlayerID, r.Err
 }
 
+// RevokeToken removes a not-yet-consumed joinToken from the match
+// actor's admission table so a subsequent MatchJoin with that token
+// gets Close{4001 AUTH}. Non-blocking; idempotent. Phase 6 §7.3.
+func (m *Match) RevokeToken(token string) {
+	select {
+	case m.in <- ctlRevokeToken{Token: token}:
+	default:
+		// Inbox full — best-effort; the lobby may retry.
+	}
+}
+
 // IsDCToken reports whether the given token currently maps to a slot
 // in DC-grace. Net layer uses this to choose between ctlJoin (fresh)
 // and ctlReconnect (reconnect path) for an incoming MatchJoin. Read
@@ -396,6 +414,11 @@ func (m *Match) handleControl(msg controlMsg) {
 		m.handleReconnect(v)
 	case ctlAbort:
 		m.abort(v.Reason)
+	case ctlRevokeToken:
+		// Phase 6 §7.3: drop from bySession (used by handleJoin for
+		// fresh-join admission). If the token was already consumed,
+		// the delete is a no-op.
+		delete(m.bySession, v.Token)
 	}
 }
 

@@ -36,11 +36,19 @@ func (l *Lobby) handleKick(s *Session, p proto.LobbyKickPayload) {
 	})
 	// Remove from room.
 	l.removeFromRoom(target, room)
-	// §7.3: invalidate any join token allocated for this player.
-	// Subsequent MatchJoin with that token returns Close{4001 AUTH}.
+	// §7.3: invalidate any join token allocated for this player. Both
+	// the lobby's bookkeeping AND the match actor's bySession admission
+	// table must drop the token; otherwise the kicked client could
+	// still consume the token on the match WS.
 	for tok, pending := range l.tokens {
-		if pending != nil && pending.SessionID == target.ID {
-			delete(l.tokens, tok)
+		if pending == nil || pending.SessionID != target.ID {
+			continue
 		}
+		if l.cfg.Registry != nil {
+			if mm, ok := l.cfg.Registry.Lookup(pending.MatchID); ok && mm != nil {
+				mm.RevokeToken(tok)
+			}
+		}
+		delete(l.tokens, tok)
 	}
 }
