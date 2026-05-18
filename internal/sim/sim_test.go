@@ -163,6 +163,44 @@ func TestDeterminism_GoldenFingerprint_Level9(t *testing.T) {
 	}
 }
 
+// TestDeterminism_SnipeAI satisfies DoD #6: two sims with identical
+// Config (incl. LevelLetter/Number) and identical inputs evolve to
+// identical fingerprints at every tick.
+func TestDeterminism_SnipeAI(t *testing.T) {
+	cfg := Config{
+		Seed:        0xC0FFEE,
+		Width:       60,
+		Height:      40,
+		PlayerIDs:   []EntityID{1},
+		LevelLetter: 'C',
+		LevelNumber: 5,
+	}
+	s1, err := NewSim(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s2, err := NewSim(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 600; i++ {
+		inputs := []PlayerInput{
+			{PlayerID: 1, Dir: Dir((i % 8) + 1), Turbo: i%9 == 0, FireDir: Dir(((i + 2) % 9)), ClientTick: uint16(i)},
+		}
+		ev1, err1 := s1.Tick(inputs)
+		ev2, err2 := s2.Tick(inputs)
+		if (err1 == nil) != (err2 == nil) {
+			t.Fatalf("tick %d errs differ", i)
+		}
+		if !reflect.DeepEqual(ev1, ev2) {
+			t.Fatalf("tick %d events differ:\n%v\n vs\n%v", i, ev1, ev2)
+		}
+		if s1.Fingerprint() != s2.Fingerprint() {
+			t.Fatalf("tick %d fingerprints differ", i)
+		}
+	}
+}
+
 // generatePhase3Inputs scripts 1200 ticks of single-player PvE action
 // (movement + occasional fire). Inputs are deterministic.
 func generatePhase3Inputs() [][]PlayerInput {
