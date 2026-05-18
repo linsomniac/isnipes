@@ -47,6 +47,9 @@ type Session struct {
 	roomID    string // empty when not in a room
 	// Last activity, for idle eviction.
 	lastSeen time.Time
+
+	// Phase 6 §6.2 — chat token bucket (lazy-init in handleChat).
+	chat *chatBucket
 }
 
 // Lobby is the actor. Construct with NewLobby and run via Run().
@@ -268,6 +271,13 @@ func (l *Lobby) handleMessage(v ctlMessage) {
 			return
 		}
 		l.handleStartMatch(s, sm)
+	case proto.LobbyChat:
+		var c proto.LobbyChatPayload
+		if err := jsonUnmarshal(env.D, &c); err != nil {
+			l.sendError(s, proto.LobbyErrBadRequest, err.Error())
+			return
+		}
+		l.handleChat(s, c)
 	default:
 		l.sendError(s, proto.LobbyErrBadRequest, "unknown type: "+env.T)
 	}

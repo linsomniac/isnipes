@@ -28,6 +28,19 @@ const (
 	LobbyStartMatch   = "startMatch"
 	LobbyMatchStarted = "matchStarted"
 	LobbyTagError     = "error"
+
+	// Phase 6 §6 — lobby chat envelopes.
+	LobbyChat      = "chat"       // C→S
+	LobbyChatRelay = "chat_relay" // S→C
+	// Phase 6 §7 — kick envelopes.
+	LobbyKick   = "kick"   // C→S (host only)
+	LobbyKicked = "kicked" // S→C (to evictee)
+	// Phase 6 §11 — roomList delta envelopes.
+	LobbyRoomAdded   = "room_added"
+	LobbyRoomUpdated = "room_updated"
+	LobbyRoomRemoved = "room_removed"
+	// Phase 6 §8.3 — level preset table sent once per session.
+	LobbyLevelPresets = "level_presets"
 )
 
 // Lobby error codes (§6.2.1).
@@ -113,6 +126,50 @@ type MatchStarted struct {
 	TickRate       int    `json:"tickRate"`
 	MapSeed        uint32 `json:"mapSeed"`
 	JoinToken      string `json:"joinToken"`
+}
+
+// LobbyChatPayload — Phase 6 §6. C→S room-scoped chat message.
+type LobbyChatPayload struct {
+	RoomID string `json:"roomId"`
+	Text   string `json:"text"` // 1..1024 bytes UTF-8 after trim
+}
+
+// LobbyChatRelayPayload — Phase 6 §6. S→C relayed message; broadcast
+// to every member of the room.
+type LobbyChatRelayPayload struct {
+	RoomID   string `json:"roomId"`
+	FromNick string `json:"fromNick"`
+	Text     string `json:"text"`
+	Ts       int64  `json:"ts"` // unix-ms at relay time
+}
+
+// LobbyKickPayload — Phase 6 §7. C→S host-only eviction.
+type LobbyKickPayload struct {
+	RoomID    string `json:"roomId"`
+	SessionID string `json:"sessionId"` // target session
+}
+
+// LobbyKickedPayload — Phase 6 §7. S→C notification to the evictee.
+type LobbyKickedPayload struct {
+	RoomID string `json:"roomId"`
+	Reason string `json:"reason"`
+}
+
+// LobbyRoomDeltaPayload — Phase 6 §11. S→C single-room delta.
+type LobbyRoomDeltaPayload struct {
+	Room RoomDescriptor `json:"room"`
+}
+
+// LobbyRoomRemovedPayload — Phase 6 §11. S→C room removal.
+type LobbyRoomRemovedPayload struct {
+	RoomID string `json:"roomId"`
+}
+
+// LobbyLevelPresetsPayload — Phase 6 §8.3. S→C one-shot preset table.
+// `Presets` is opaque to the proto package; the lobby builds the
+// concrete slice and JSON-marshals it here.
+type LobbyLevelPresetsPayload struct {
+	Presets json.RawMessage `json:"presets"`
 }
 
 // LobbyError payload (S→C).
