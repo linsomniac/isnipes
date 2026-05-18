@@ -1,0 +1,4 @@
+.phase-loop-notes.md
+*.test
+*.out
+coverage.out
