@@ -327,6 +327,23 @@ func (m *Match) SubmitReconnect(token string, out chan<- OutboundFrame) (sim.Ent
 	return r.PlayerID, r.Err
 }
 
+// JoinedCount returns the number of slots whose MatchJoin has been
+// processed AND who have not had their slot terminated (DC + grace
+// expiry deletes the slot entirely). DeadCam and DC-without-removal
+// slots count as joined. Snapshot read; safe for concurrent callers
+// only when the match is in StateEnded — otherwise this is best-effort
+// and may observe a race-window count off by one. The lobby uses this
+// only via the §10.2 zero-player sweeper which tolerates such drift.
+func (m *Match) JoinedCount() int {
+	n := 0
+	for _, s := range m.slots {
+		if s.Joined {
+			n++
+		}
+	}
+	return n
+}
+
 // RevokeToken removes a not-yet-consumed joinToken from the match
 // actor's admission table so a subsequent MatchJoin with that token
 // gets Close{4001 AUTH}. Non-blocking; idempotent. Phase 6 §7.3.

@@ -35,6 +35,13 @@ type Config struct {
 	TokenTTL      time.Duration    // default TokenTTL (60s)
 	MOTD          string
 	ServerVersion string
+
+	// Phase 6 §10.3 — janitor cadence override for tests. Zero means
+	// the default 10s cadence (production).
+	JanitorInterval time.Duration
+	// Phase 6 §10.1/§10.2 — empty-room / zero-player threshold. Zero
+	// means the default 30s.
+	GCInactivityThreshold time.Duration
 }
 
 // Session is one connected lobby WS.
@@ -66,6 +73,9 @@ type Lobby struct {
 	rooms    map[string]*Room
 	tokens   map[string]*pendingMatchJoin // active joinTokens
 
+	// Phase 6 §10.2 — per-match zero-player tracking.
+	matchTrackers map[string]*matchTracker
+
 	// next EntityID for the lobby to hand out per room. Player IDs
 	// must be globally unique within the (sim Config) check; we keep
 	// them lobby-scoped and let each match's NewSim accept them.
@@ -87,14 +97,15 @@ func NewLobby(cfg Config) *Lobby {
 		cfg.ServerVersion = "v0.0.0-phase2"
 	}
 	return &Lobby{
-		cfg:          cfg,
-		in:           make(chan controlMsg, 1024),
-		done:         make(chan struct{}),
-		clock:        cfg.Clock,
-		sessions:     make(map[SessionID]*Session),
-		rooms:        make(map[string]*Room),
-		tokens:       make(map[string]*pendingMatchJoin),
-		nextEntityID: 1,
+		cfg:           cfg,
+		in:            make(chan controlMsg, 1024),
+		done:          make(chan struct{}),
+		clock:         cfg.Clock,
+		sessions:      make(map[SessionID]*Session),
+		rooms:         make(map[string]*Room),
+		tokens:        make(map[string]*pendingMatchJoin),
+		matchTrackers: make(map[string]*matchTracker),
+		nextEntityID:  1,
 	}
 }
 
@@ -183,7 +194,11 @@ func (l *Lobby) Disconnect(sid SessionID) {
 
 // Run drives the actor. Returns when Stop is called.
 func (l *Lobby) Run() {
-	janitorTicker := time.NewTicker(10 * time.Second)
+	interval := l.cfg.JanitorInterval
+	if interval <= 0 {
+		interval = 10 * time.Second
+	}
+	janitorTicker := time.NewTicker(interval)
 	defer janitorTicker.Stop()
 	for {
 		select {
@@ -194,6 +209,8 @@ func (l *Lobby) Run() {
 		case <-janitorTicker.C:
 			l.expireTokens()
 			l.expireIdleSessions()
+			l.sweepEmptyRooms()
+			l.sweepZeroPlayerMatches()
 		}
 	}
 }
@@ -413,18 +430,20 @@ func (l *Lobby) removeFromRoom(s *Session, room *Room) {
 		}
 	}
 	s.roomID = ""
-	// If the host left, close the room. (Phase 2: no host-handoff.)
+	// Phase 6 §7.4: host transfer on leaveRoom. If the leaver was the
+	// host AND there are remaining members, the oldest-joined member
+	// becomes the new host (Members is kept in join order).
 	closed := false
-	if room.Host == string(s.ID) || len(room.Members) == 0 {
-		room.State = RoomClosed
-		// Kick the remaining members out of their roomID assignment.
-		for _, pid := range room.Members {
-			if other, ok := l.sessions[SessionID(pid)]; ok {
-				other.roomID = ""
-			}
+	if room.Host == string(s.ID) {
+		if len(room.Members) > 0 {
+			room.Host = room.Members[0]
 		}
-		delete(l.rooms, room.ID)
-		closed = true
+	}
+	if len(room.Members) == 0 {
+		// Truly empty — leave the room for the §10.1 sweep to GC.
+		// (Or immediately close if the empty state is permanent.) For
+		// now stamp EmptySince and let the janitor handle it.
+		room.EmptySince = l.clock()
 	}
 	l.broadcastRoomList()
 	// Phase 6 §11: delta envelope alongside the legacy full-list.
@@ -512,6 +531,7 @@ func (l *Lobby) handleStartMatch(s *Session, sm proto.StartMatch) {
 		}
 	}
 	room.MatchID = matchID
+	l.matchTrackers[matchID] = &matchTracker{matchID: matchID}
 	// §7.2: stay in STARTING until at least one MatchJoin succeeds.
 	// Phase 2 does not wire a match→lobby callback for that
 	// transition; rooms remain STARTING until ctlMatchEnded fires.

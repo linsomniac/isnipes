@@ -1,6 +1,8 @@
 package lobby
 
 import (
+	"time"
+
 	"github.com/jafo/isnipes/internal/proto"
 	"github.com/jafo/isnipes/internal/sim"
 )
@@ -43,6 +45,10 @@ type Room struct {
 	MatchID string
 	// Pending player→EntityID assignments for the match.
 	Slots []sim.EntityID
+
+	// Phase 6 §10.1 — set when Members goes to zero; cleared when a
+	// fresh member joins. Used by sweepEmptyRooms.
+	EmptySince time.Time
 }
 
 // describe returns the wire RoomDescriptor.
