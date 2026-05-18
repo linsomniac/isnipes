@@ -54,6 +54,7 @@ type Lobby struct {
 	cfg Config
 
 	in      chan controlMsg
+	done    chan struct{}
 	clock   func() time.Time
 	stopped atomic.Bool
 
@@ -85,6 +86,7 @@ func NewLobby(cfg Config) *Lobby {
 	return &Lobby{
 		cfg:          cfg,
 		in:           make(chan controlMsg, 1024),
+		done:         make(chan struct{}),
 		clock:        cfg.Clock,
 		sessions:     make(map[SessionID]*Session),
 		rooms:        make(map[string]*Room),
@@ -93,12 +95,13 @@ func NewLobby(cfg Config) *Lobby {
 	}
 }
 
-// Stop signals the actor to exit. Idempotent.
+// Stop signals the actor to exit. Idempotent. Closes done; producers
+// observe l.stopped.Load() before sending to l.in.
 func (l *Lobby) Stop() {
 	if l.stopped.Swap(true) {
 		return
 	}
-	close(l.in)
+	close(l.done)
 }
 
 // controlMsg dispatch.
@@ -131,33 +134,59 @@ func (ctlJanitor) controlTag()    {}
 // Connect registers a new WS session and returns its handle. The
 // caller forwards subsequent inbound JSON bytes via PostMessage.
 // The returned Session.Out can be drained by the WS writer.
+// Returns nil if the lobby has stopped.
 func (l *Lobby) Connect(out chan Outbound) *Session {
+	if l.stopped.Load() {
+		close(out)
+		return nil
+	}
 	reply := make(chan *Session, 1)
-	l.in <- ctlConnect{Out: out, Reply: reply}
-	return <-reply
+	select {
+	case l.in <- ctlConnect{Out: out, Reply: reply}:
+	case <-l.done:
+		close(out)
+		return nil
+	}
+	select {
+	case s := <-reply:
+		return s
+	case <-l.done:
+		close(out)
+		return nil
+	}
 }
 
 // PostMessage delivers one inbound lobby WS message.
 func (l *Lobby) PostMessage(sid SessionID, raw []byte) {
-	l.in <- ctlMessage{SessionID: sid, Raw: raw}
+	if l.stopped.Load() {
+		return
+	}
+	select {
+	case l.in <- ctlMessage{SessionID: sid, Raw: raw}:
+	case <-l.done:
+	}
 }
 
 // Disconnect cleans up after the WS closes.
 func (l *Lobby) Disconnect(sid SessionID) {
-	l.in <- ctlDisconnect{SessionID: sid}
+	if l.stopped.Load() {
+		return
+	}
+	select {
+	case l.in <- ctlDisconnect{SessionID: sid}:
+	case <-l.done:
+	}
 }
 
-// Run drives the actor. Returns when Stop is called or when the
-// inbox is closed.
+// Run drives the actor. Returns when Stop is called.
 func (l *Lobby) Run() {
 	janitorTicker := time.NewTicker(10 * time.Second)
 	defer janitorTicker.Stop()
 	for {
 		select {
-		case msg, ok := <-l.in:
-			if !ok {
-				return
-			}
+		case <-l.done:
+			return
+		case msg := <-l.in:
 			l.handle(msg)
 		case <-janitorTicker.C:
 			l.expireTokens()
