@@ -24,6 +24,9 @@ const (
 
 	// Phase 5 §3.8.1: 10-minute hard timer.
 	MatchTimerTicks uint32 = 30 * 60 * 10
+
+	// Phase 5 §4.7.1: 30-second DC-grace before slot termination.
+	DCGraceTicks uint32 = 30 * 30
 )
 
 // Ticker is an injectable abstraction for unit tests. Production uses
@@ -64,6 +67,12 @@ type Slot struct {
 	// and the slot now serves a dead-cam stream: unfiltered snapshots
 	// with your_entity_id=0 and only Chat input accepted.
 	DeadCam bool
+
+	// Phase 5 §9 — set when the slot's WS dropped mid-match. The
+	// entity is frozen in the sim but still targetable; the slot is
+	// reclaimable via reconnect within DCGraceTicks of DCDeadlineTick.
+	DC             bool
+	DCDeadlineTick uint32
 }
 
 // OutboundFrame is what the match actor pushes to a WS writer.
@@ -96,6 +105,11 @@ type MatchConfig struct {
 	// no generators). Non-zero pair = full PvE match.
 	LevelLetter byte
 	LevelNumber int
+
+	// Phase 5 §4.7.1 testhook — override the DC-grace window. Zero
+	// means use the default DCGraceTicks (30 s @ 30 Hz). Production
+	// callers leave this zero.
+	DCGraceTicksOverride uint32
 }
 
 // controlMsg is the internal inbox payload.
@@ -129,11 +143,21 @@ type ctlClose struct {
 
 type ctlAbort struct{ Reason string }
 
-func (ctlJoin) controlTag()  {}
-func (ctlInput) controlTag() {}
-func (ctlPong) controlTag()  {}
-func (ctlClose) controlTag() {}
-func (ctlAbort) controlTag() {}
+// Phase 5 §9 — DC + reconnect control messages.
+type ctlDC struct{ PlayerID sim.EntityID }
+type ctlReconnect struct {
+	Token string
+	Out   chan<- OutboundFrame
+	Reply chan<- joinResult
+}
+
+func (ctlJoin) controlTag()      {}
+func (ctlInput) controlTag()     {}
+func (ctlPong) controlTag()      {}
+func (ctlClose) controlTag()     {}
+func (ctlAbort) controlTag()     {}
+func (ctlDC) controlTag()        {}
+func (ctlReconnect) controlTag() {}
 
 // Match is the actor. Construct with NewMatch and run via Run().
 type Match struct {
@@ -170,6 +194,14 @@ type Match struct {
 	// constructed with a level table (LevelLetter != 0). Determines
 	// whether evaluateMatchEnd evaluates the PVE_COMPLETE rule.
 	isPvE bool
+
+	// Phase 5 §9.4: tokens belonging to slots currently in DC-grace.
+	// Each entry maps the *original* joinToken to the slot's PlayerID.
+	// Re-armed on entering DC-grace, deleted on successful reconnect
+	// OR at DC-grace deadline expiry. The mutex serialises actor
+	// writes with concurrent IsDCToken reads from the net layer.
+	dcTokensMu sync.RWMutex
+	dcTokens   map[string]sim.EntityID
 }
 
 // NewMatch constructs a Match in StateNew.
@@ -201,6 +233,7 @@ func NewMatch(cfg MatchConfig) (*Match, error) {
 		ticker:        cfg.Ticker,
 		pendingInputs: make(map[sim.EntityID]proto.Input),
 		owt:           make(map[sim.EntityID]*OWTEstimator),
+		dcTokens:      make(map[string]sim.EntityID),
 	}
 	for _, p := range cfg.PlayerSlots {
 		m.slots[p.PlayerID] = &Slot{PlayerID: p.PlayerID, Nick: p.Nick, closed: make(chan struct{})}
@@ -259,6 +292,43 @@ func (m *Match) SubmitPong(playerID sim.EntityID, rttMs uint32) {
 // SubmitClose informs the actor that a player's WS has closed.
 func (m *Match) SubmitClose(playerID sim.EntityID, reason uint8) {
 	m.in <- ctlClose{PlayerID: playerID, Reason: reason}
+}
+
+// SubmitDC reports that a player's WS has dropped mid-match. The slot
+// enters DC-grace per §4.7.1 and the entity is frozen in the sim but
+// remains targetable. Idempotent: a second SubmitDC for the same slot
+// before reconnect is a no-op. PHASE5.md §9.1.
+func (m *Match) SubmitDC(playerID sim.EntityID) {
+	select {
+	case m.in <- ctlDC{PlayerID: playerID}:
+	default:
+		// Inbox full — best-effort.
+	}
+}
+
+// SubmitReconnect attempts to re-bind a fresh WS to an existing
+// DC-graced slot. Returns the PlayerID on success or ErrAuth on any
+// rejection (unknown token, grace expired, slot already re-bound,
+// match already ended). PHASE5.md §9.3.
+func (m *Match) SubmitReconnect(token string, out chan<- OutboundFrame) (sim.EntityID, error) {
+	if m.State() == StateEnded {
+		return 0, ErrAuth
+	}
+	reply := make(chan joinResult, 1)
+	m.in <- ctlReconnect{Token: token, Out: out, Reply: reply}
+	r := <-reply
+	return r.PlayerID, r.Err
+}
+
+// IsDCToken reports whether the given token currently maps to a slot
+// in DC-grace. Net layer uses this to choose between ctlJoin (fresh)
+// and ctlReconnect (reconnect path) for an incoming MatchJoin. Read
+// is best-effort; the actor revalidates on processing.
+func (m *Match) IsDCToken(token string) bool {
+	m.dcTokensMu.RLock()
+	defer m.dcTokensMu.RUnlock()
+	_, ok := m.dcTokens[token]
+	return ok
 }
 
 // Run drives the match to completion. Returns when ENDED or aborted.
@@ -320,6 +390,10 @@ func (m *Match) handleControl(msg controlMsg) {
 		}
 	case ctlClose:
 		m.handleClose(v)
+	case ctlDC:
+		m.handleDC(v)
+	case ctlReconnect:
+		m.handleReconnect(v)
 	case ctlAbort:
 		m.abort(v.Reason)
 	}
@@ -531,6 +605,17 @@ func (m *Match) tick() {
 		}
 		if m.sim.Eliminated(pid) {
 			slot.DeadCam = true
+		}
+	}
+
+	// Phase 5 §9.2: drop DC slots whose grace window has expired.
+	now := m.sim.ServerTick()
+	for pid, slot := range m.slots {
+		if !slot.DC {
+			continue
+		}
+		if now >= slot.DCDeadlineTick {
+			m.dropDCSlot(pid, slot)
 		}
 	}
 
@@ -792,8 +877,11 @@ func (m *Match) drainInboxAfterEnd() {
 	for {
 		select {
 		case msg := <-m.in:
-			if j, ok := msg.(ctlJoin); ok {
-				j.Reply <- joinResult{Err: ErrAuth}
+			switch v := msg.(type) {
+			case ctlJoin:
+				v.Reply <- joinResult{Err: ErrAuth}
+			case ctlReconnect:
+				v.Reply <- joinResult{Err: ErrAuth}
 			}
 		default:
 			return

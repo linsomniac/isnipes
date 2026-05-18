@@ -287,6 +287,26 @@ func DecodeMatchOver(payload []byte) (MatchOver, error) {
 	return mo, nil
 }
 
+// Resync §4.3.2 (Phase 5). Sent immediately before the
+// MapInit/Snapshot/Scoreboard triple on reconnect; tells the client
+// to drop its prediction buffer.
+type Resync struct {
+	ServerTick uint32
+}
+
+func (m Resync) Encode(dst []byte) ([]byte, error) {
+	var buf [4]byte
+	putLE32(buf[:], m.ServerTick)
+	return append(dst, buf[:]...), nil
+}
+
+func DecodeResync(payload []byte) (Resync, error) {
+	if len(payload) != 4 {
+		return Resync{}, ErrMalformed
+	}
+	return Resync{ServerTick: leUint32(payload[:4])}, nil
+}
+
 // MapInit §6.3.7.
 type MapInit struct {
 	Seed        uint32

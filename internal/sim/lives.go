@@ -99,6 +99,37 @@ func (s *Sim) awardKill(killer EntityID, victimKind EntityKind) {
 	}
 }
 
+// FreezePlayer zeroes the velocity for the given player's slab entry
+// (if present) and clears any pending fire intent. Used by the match
+// actor when a connection drops into DC-grace per §4.7.1; the entity
+// remains targetable but stops applying inputs. Idempotent and safe
+// when the entity does not exist.
+func (s *Sim) FreezePlayer(id EntityID) {
+	idx := s.store.findByID(id)
+	if idx >= 0 {
+		e := &s.store.slots[idx]
+		if e.Kind == KindPlayer {
+			e.VX, e.VY = 0, 0
+		}
+	}
+	if ps, ok := s.store.players[id]; ok {
+		ps.fireCooldown = 0
+		ps.lastDir = DirIdle
+	}
+}
+
+// RemovePlayer fully removes a player from the sim — slab entry,
+// playerState, history, and per-entity PRNG state. Used at the §4.7.1
+// 30-second DC-grace deadline for slot termination (the "slot is
+// terminated" path). Distinct from elimination, which retains the
+// playerState record for the §16.1 fingerprint tail.
+func (s *Sim) RemovePlayer(id EntityID) {
+	s.store.remove(id)
+	if s.entityPRNGs != nil {
+		delete(s.entityPRNGs.cache, id)
+	}
+}
+
 // startingLivesFor returns the per-player starting-lives count given
 // the (possibly absent) level table configuration. §6.2.
 func startingLivesFor(cfg Config) uint8 {
