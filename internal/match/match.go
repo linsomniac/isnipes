@@ -202,6 +202,14 @@ type Match struct {
 	// whether evaluateMatchEnd evaluates the PVE_COMPLETE rule.
 	isPvE bool
 
+	// Phase 5 §12 — scoreboard delta detector state. lastScores tracks
+	// the per-player (Lives, Score) snapshot at the last broadcast;
+	// pendingScoreboard is set when a change is observed but cooldown
+	// hasn't elapsed; lastScoreboardTick gates emission at ≤ 5 Hz.
+	lastScores         scoreSnapshot
+	pendingScoreboard  bool
+	lastScoreboardTick uint32
+
 	// Phase 5 §9.4: tokens belonging to slots currently in DC-grace.
 	// Each entry maps the *original* joinToken to the slot's PlayerID.
 	// Re-armed on entering DC-grace, deleted on successful reconnect
@@ -241,6 +249,7 @@ func NewMatch(cfg MatchConfig) (*Match, error) {
 		pendingInputs: make(map[sim.EntityID]proto.Input),
 		owt:           make(map[sim.EntityID]*OWTEstimator),
 		dcTokens:      make(map[string]sim.EntityID),
+		lastScores:    newScoreSnapshot(),
 	}
 	for _, p := range cfg.PlayerSlots {
 		m.slots[p.PlayerID] = &Slot{PlayerID: p.PlayerID, Nick: p.Nick, closed: make(chan struct{})}
@@ -658,6 +667,10 @@ func (m *Match) tick() {
 			m.dropDCSlot(pid, slot)
 		}
 	}
+
+	// Phase 5 §12: per-tick scoreboard delta detector + rate-limited
+	// broadcast.
+	m.maybeBroadcastScoreboard()
 
 	// Broadcast snapshot every snapshotEveryTicks.
 	if m.sim.ServerTick()%snapshotEveryTicks == 0 {
