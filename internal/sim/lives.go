@@ -130,6 +130,18 @@ func (s *Sim) RemovePlayer(id EntityID) {
 	}
 }
 
+// ProjectileShooter returns the EntityID of the player or snipe that
+// fired the given projectile, or 0 if the projectile is unknown.
+// Used by match-layer AOI to identify "recipient's own projectiles"
+// (§5.3.1 priority 3).
+func (s *Sim) ProjectileShooter(pid EntityID) EntityID {
+	ps, ok := s.store.projectiles[pid]
+	if !ok || ps == nil {
+		return 0
+	}
+	return ps.shooterID
+}
+
 // startingLivesFor returns the per-player starting-lives count given
 // the (possibly absent) level table configuration. §6.2.
 func startingLivesFor(cfg Config) uint8 {

@@ -14,50 +14,12 @@ import (
 // once that file lands).
 func (m *Match) buildSnapshotFor(recipient sim.EntityID) proto.Snapshot {
 	if slot, ok := m.slots[recipient]; ok && slot.DeadCam {
+		// Clear any hysteresis bookkeeping for the recipient — once
+		// they enter dead-cam the priority-aware aoiPrev is invalid.
+		delete(m.aoiPrev, recipient)
 		return m.buildDeadCamSnapshotFor(recipient)
 	}
-	entities := m.sim.Entities()
-	wire := make([]proto.Entity, 0, len(entities))
-	for _, e := range entities {
-		// Phase 5: allow FlagSpawnInvuln through (§4.3.2 bit 1) so the
-		// client can render the invuln cue.
-		flags := e.Flags & (sim.FlagDead | sim.FlagSpawnInvuln | sim.FlagTurbo)
-		wire = append(wire, proto.Entity{
-			ID:     uint32(e.ID),
-			Kind:   uint8(e.Kind),
-			HP:     e.HP,
-			Facing: uint8(e.Facing),
-			Flags:  flags,
-			X:      e.X,
-			Y:      e.Y,
-			VX:     e.VX,
-			VY:     e.VY,
-		})
-	}
-	if len(wire) > proto.MaxEntitiesPerSnapshot {
-		wire = wire[:proto.MaxEntitiesPerSnapshot]
-	}
-
-	// Determine your_entity_id: 0 if the recipient is dead OR not in the
-	// entity list (under NoRespawn=true a dead player has been GC'd).
-	var yourID uint32
-	alive := false
-	for _, e := range entities {
-		if e.ID == recipient && e.Flags&sim.FlagDead == 0 {
-			alive = true
-			break
-		}
-	}
-	if alive {
-		yourID = uint32(recipient)
-	}
-
-	return proto.Snapshot{
-		ServerTick:        m.sim.ServerTick(),
-		YourLastInputTick: m.sim.LastInputTick(recipient),
-		YourEntityID:      yourID,
-		Entities:          wire,
-	}
+	return m.buildPriorityAOISnapshotFor(recipient)
 }
 
 // buildDeadCamSnapshotFor emits the §11.6 unfiltered dead-cam snapshot:

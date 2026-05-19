@@ -68,3 +68,18 @@ func RemoveAllSnipesForTest(s *Sim) {
 		}
 	}
 }
+
+// SpawnSnipeOrZeroForTest spawns a snipe at the given tile centre.
+// Cross-pkg testhooks variant of internal/sim/export_test.go's
+// SpawnSnipeForTest (which is intra-pkg only). Returns 0 on alloc
+// failure (vs. panic).
+func SpawnSnipeOrZeroForTest(s *Sim, parentGen EntityID, tx, ty int) EntityID {
+	id, ok := s.spawnSnipeAt(parentGen,
+		int32(tx*subtilePerTile+subtilePerTile/2),
+		int32(ty*subtilePerTile+subtilePerTile/2),
+		tx, ty)
+	if !ok {
+		return 0
+	}
+	return id
+}

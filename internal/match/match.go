@@ -202,6 +202,11 @@ type Match struct {
 	// whether evaluateMatchEnd evaluates the PVE_COMPLETE rule.
 	isPvE bool
 
+	// Phase 5 §11.3 — per-recipient hysteresis state. Each entry is
+	// the set of EntityIDs included in the recipient's previous tick
+	// snapshot. Cleared on dead-cam transition or reconnect.
+	aoiPrev map[sim.EntityID]map[sim.EntityID]struct{}
+
 	// Phase 5 codex P5/iter6 — closed when Run returns. Used by
 	// SubmitReconnect to abandon a pending Reply if the actor exits
 	// between the StateEnded gate and the inbox send.
