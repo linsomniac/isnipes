@@ -48,6 +48,22 @@ func TestScoreDelta_NoChangeNoEmit(t *testing.T) {
 	}
 }
 
+// TestScoreDelta_DiffsKeyswapSameCardinality — codex P5/iter5
+// finding: prev has id X with zero score; cur has id Y (zero score)
+// instead. Same map length but different keyset must count as a
+// change.
+func TestScoreDelta_DiffsKeyswapSameCardinality(t *testing.T) {
+	prev := newScoreSnapshot()
+	prev.score[1] = 0
+	prev.lives[1] = 0
+	cur := newScoreSnapshot()
+	cur.score[2] = 0
+	cur.lives[2] = 0
+	if !cur.diffs(prev) {
+		t.Fatal("same-cardinality keyset swap not detected")
+	}
+}
+
 // TestScoreDelta_RateLimited — burst of kills inside the 6-tick window
 // emits ONE Scoreboard, not many.
 func TestScoreDelta_RateLimited(t *testing.T) {

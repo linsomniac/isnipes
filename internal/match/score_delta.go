@@ -47,13 +47,18 @@ func (s scoreSnapshot) diffs(prev scoreSnapshot) bool {
 	if len(s.score) != len(prev.score) {
 		return true
 	}
+	// Codex P5/iter5: distinguish "missing key" from "zero value". A
+	// same-cardinality keyset swap (id 1 removed, id 2 added with
+	// zero score) would otherwise read as no change.
 	for id, v := range s.score {
-		if prev.score[id] != v {
+		pv, ok := prev.score[id]
+		if !ok || pv != v {
 			return true
 		}
 	}
 	for id, v := range s.lives {
-		if prev.lives[id] != v {
+		pv, ok := prev.lives[id]
+		if !ok || pv != v {
 			return true
 		}
 	}
