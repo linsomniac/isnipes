@@ -14,6 +14,7 @@ import (
 	"github.com/jafo/isnipes/internal/lobby"
 	"github.com/jafo/isnipes/internal/match"
 	"github.com/jafo/isnipes/internal/proto"
+	"github.com/jafo/isnipes/internal/sim"
 )
 
 // ServerConfig governs the Server.
@@ -186,7 +187,15 @@ func (s *Server) handleMatch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	out := make(chan match.OutboundFrame, 64)
-	pid, err := m.SubmitJoin(string(mj.Token), out)
+	// Phase 5 §16.2: route to reconnect if the token belongs to a slot
+	// currently in DC-grace; otherwise fall back to the fresh-join path.
+	token := string(mj.Token)
+	var pid sim.EntityID
+	if m.IsDCToken(token) {
+		pid, err = m.SubmitReconnect(token, out)
+	} else {
+		pid, err = m.SubmitJoin(token, out)
+	}
 	if err != nil {
 		_ = closeWith(c, CloseAuth)
 		return
@@ -248,18 +257,18 @@ func (s *Server) handleMatch(w http.ResponseWriter, r *http.Request) {
 		mtype, data, err := c.Read(readCtx)
 		readCancel()
 		if err != nil {
-			m.SubmitClose(pid, 0)
+			m.SubmitDC(pid)
 			return
 		}
 		if mtype != websocket.MessageBinary {
 			_ = closeWith(c, CloseMalformed)
-			m.SubmitClose(pid, 0)
+			m.SubmitDC(pid)
 			return
 		}
 		hdr, payload, _, err := proto.DecodeFrame(data)
 		if err != nil {
 			_ = closeWith(c, CloseMalformed)
-			m.SubmitClose(pid, 0)
+			m.SubmitDC(pid)
 			return
 		}
 		switch hdr.Type {
@@ -267,7 +276,7 @@ func (s *Server) handleMatch(w http.ResponseWriter, r *http.Request) {
 			inp, err := proto.DecodeInput(payload)
 			if err != nil {
 				_ = closeWith(c, CloseMalformed)
-				m.SubmitClose(pid, 0)
+				m.SubmitDC(pid)
 				return
 			}
 			m.SubmitInput(pid, inp)
@@ -290,7 +299,7 @@ func (s *Server) handleMatch(w http.ResponseWriter, r *http.Request) {
 			p, err := proto.DecodePong(payload)
 			if err != nil {
 				_ = closeWith(c, CloseMalformed)
-				m.SubmitClose(pid, 0)
+				m.SubmitDC(pid)
 				return
 			}
 			now := uint32(time.Now().UnixMilli())
@@ -302,7 +311,7 @@ func (s *Server) handleMatch(w http.ResponseWriter, r *http.Request) {
 		case proto.MsgMatchJoin:
 			// MatchJoin after first frame is malformed.
 			_ = closeWith(c, CloseMalformed)
-			m.SubmitClose(pid, 0)
+			m.SubmitDC(pid)
 			return
 		default:
 			// Ignore unknown types (e.g. Chat) — Phase 2 doesn't

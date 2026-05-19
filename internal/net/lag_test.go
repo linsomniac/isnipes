@@ -230,6 +230,67 @@ func TestNet_JitteryClientStillReceivesFrames(t *testing.T) {
 	}
 }
 
+// TestNet_ReconnectViaDispatcher — Phase 5 §16.2 / DoD #3. Connect,
+// MatchJoin, drop the WS (triggers SubmitDC), reconnect on a fresh
+// WS with the same token. The dispatcher sees IsDCToken=true and
+// routes to SubmitReconnect; the fresh WS receives the §9.5 resync
+// sequence (Resync → MapInit → Snapshot → Scoreboard).
+func TestNet_ReconnectViaDispatcher(t *testing.T) {
+	ts, reg, lob, cleanup := laggedServer(t, 100*time.Millisecond)
+	defer cleanup()
+	matchID, token, m := joinMatchSetup(t, reg, lob)
+	defer m.Abort("test")
+
+	// Connection #1.
+	ctx := context.Background()
+	c1, cancel1 := dialMatch(t, ts, matchID)
+	sendMatchJoin(t, c1, ctx, token)
+	// Drain a couple of post-join frames so the actor has seen us.
+	for i := 0; i < 2; i++ {
+		recvFrame(t, c1, ctx, 300*time.Millisecond)
+	}
+	// Drop WS #1. The reader returns; server should SubmitDC(pid).
+	_ = c1.Close(websocket.StatusNormalClosure, "")
+	cancel1()
+
+	// Give the actor time to enter DC state.
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if m.IsDCToken(token) {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if !m.IsDCToken(token) {
+		t.Fatal("token did not register as DC-graced after drop")
+	}
+
+	// Connection #2 — same token, fresh WS.
+	c2, cancel2 := dialMatch(t, ts, matchID)
+	defer cancel2()
+	defer c2.Close(websocket.StatusNormalClosure, "")
+	sendMatchJoin(t, c2, ctx, token)
+
+	// Expect Resync as the first server-initiated frame post-MatchJoin.
+	// (Pings may interleave; collect frames until we see all four
+	// resync envelopes or 2s elapse.)
+	want := []proto.MsgType{proto.MsgResync, proto.MsgMapInit, proto.MsgSnapshot, proto.MsgScoreboard}
+	idx := 0
+	deadline = time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) && idx < len(want) {
+		hdr, _, ok := recvFrame(t, c2, ctx, 500*time.Millisecond)
+		if !ok {
+			break
+		}
+		if hdr.Type == want[idx] {
+			idx++
+		}
+	}
+	if idx != len(want) {
+		t.Fatalf("resync sequence incomplete; saw %d of %d expected types", idx, len(want))
+	}
+}
+
 // TestNet_IdleTimeoutDrops: a client that NEVER sends and NEVER
 // reads stays alive only as long as the server's idle timeout. The
 // real flow: even an idle client receives server Pings (which DO
