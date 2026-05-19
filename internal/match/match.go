@@ -202,6 +202,11 @@ type Match struct {
 	// whether evaluateMatchEnd evaluates the PVE_COMPLETE rule.
 	isPvE bool
 
+	// Phase 5 codex P5/iter6 — closed when Run returns. Used by
+	// SubmitReconnect to abandon a pending Reply if the actor exits
+	// between the StateEnded gate and the inbox send.
+	done chan struct{}
+
 	// Phase 5 §12 — scoreboard delta detector state. lastScores tracks
 	// the per-player (Lives, Score) snapshot at the last broadcast;
 	// pendingScoreboard is set when a change is observed but cooldown
@@ -250,6 +255,7 @@ func NewMatch(cfg MatchConfig) (*Match, error) {
 		owt:           make(map[sim.EntityID]*OWTEstimator),
 		dcTokens:      make(map[string]sim.EntityID),
 		lastScores:    newScoreSnapshot(),
+		done:          make(chan struct{}),
 	}
 	for _, p := range cfg.PlayerSlots {
 		m.slots[p.PlayerID] = &Slot{PlayerID: p.PlayerID, Nick: p.Nick, closed: make(chan struct{})}
@@ -310,6 +316,27 @@ func (m *Match) SubmitClose(playerID sim.EntityID, reason uint8) {
 	m.in <- ctlClose{PlayerID: playerID, Reason: reason}
 }
 
+// SubmitMatchJoin is the unified admission entry point: the actor
+// decides between fresh-join and reconnect by inspecting bySession
+// AND dcTokens together — eliminating the TOCTOU window in the
+// net-layer dispatcher (codex P5/iter6 #1). Falls back to ErrAuth
+// for unknown tokens.
+func (m *Match) SubmitMatchJoin(token string, out chan<- OutboundFrame) (sim.EntityID, error) {
+	if m.State() == StateEnded {
+		return 0, ErrAuth
+	}
+	// Fast path: if the token is currently DC-graced, route via
+	// SubmitReconnect. dcTokens is mutex-protected.
+	m.dcTokensMu.RLock()
+	_, isDC := m.dcTokens[token]
+	m.dcTokensMu.RUnlock()
+	if isDC {
+		return m.SubmitReconnect(token, out)
+	}
+	// Otherwise: try fresh-join. handleJoin re-checks ErrAuth.
+	return m.SubmitJoin(token, out)
+}
+
 // SubmitDC reports that a player's WS has dropped mid-match. The slot
 // enters DC-grace per §4.7.1 and the entity is frozen in the sim but
 // remains targetable. Idempotent: a second SubmitDC for the same slot
@@ -332,8 +359,23 @@ func (m *Match) SubmitReconnect(token string, out chan<- OutboundFrame) (sim.Ent
 	}
 	reply := make(chan joinResult, 1)
 	m.in <- ctlReconnect{Token: token, Out: out, Reply: reply}
-	r := <-reply
-	return r.PlayerID, r.Err
+	// Codex P5/iter6 #2: select on done so a race between SubmitReconnect's
+	// state-check and the actor's deadline-drop exit cannot block forever.
+	// absorbAfterExit also drains ctlReconnect post-exit, but a slow
+	// scheduler could deliver done before absorb wakes; this guard
+	// makes the API hang-proof even under that race.
+	select {
+	case r := <-reply:
+		return r.PlayerID, r.Err
+	case <-m.done:
+		// Actor exited. Wait briefly for the absorber to ErrAuth us.
+		select {
+		case r := <-reply:
+			return r.PlayerID, r.Err
+		case <-time.After(500 * time.Millisecond):
+			return 0, ErrAuth
+		}
+	}
 }
 
 // JoinedCount returns the number of slots whose MatchJoin has been
@@ -382,6 +424,11 @@ func (m *Match) Run() {
 			m.abortFromPanic(r)
 		}
 		m.ticker.Stop()
+		// Spawn a tail absorber so any control message that arrives
+		// after Run returns (race window per codex P5/iter6 #2) gets
+		// an ErrAuth reply instead of blocking the sender forever.
+		go m.absorbAfterExit()
+		close(m.done)
 	}()
 
 	warmupStart := m.clock()
@@ -455,6 +502,18 @@ const tokenTTL = 60 * time.Second
 
 // handleJoin processes a MatchJoin. Reply is sent via v.Reply.
 func (m *Match) handleJoin(v ctlJoin) {
+	// Phase 5 codex P5/iter6 #1: if the token is currently DC-graced,
+	// the caller raced the net-layer dispatcher (SubmitDC not yet
+	// processed when the new WS sent MatchJoin). Reroute to the
+	// reconnect path so a legitimate fast reconnect doesn't get
+	// CloseAuth.
+	m.dcTokensMu.RLock()
+	_, isDC := m.dcTokens[v.Token]
+	m.dcTokensMu.RUnlock()
+	if isDC {
+		m.handleReconnect(ctlReconnect{Token: v.Token, Out: v.Out, Reply: v.Reply})
+		return
+	}
 	// Phase 2 does not support late join (§9.3 / §1 "no late-join").
 	if m.state() == StateLive || m.state() == StateEnded {
 		v.Reply <- joinResult{Err: ErrAuth}
@@ -926,6 +985,38 @@ func (m *Match) Abort(reason string) {
 // returned — will block forever. That race is unobservable in Phase 2
 // because callers serialise through the lobby and registry handoff,
 // but Phase 5's reconnect work will need a stronger contract.
+// absorbAfterExit is the tail goroutine spawned by Run's defer. It
+// keeps draining m.in indefinitely so any ctlJoin / ctlReconnect that
+// arrives after the actor exit gets an ErrAuth reply. Exits when the
+// inbox stays empty for 10 s (well past any caller's wait budget).
+func (m *Match) absorbAfterExit() {
+	idle := time.NewTimer(10 * time.Second)
+	defer idle.Stop()
+	for {
+		select {
+		case msg, ok := <-m.in:
+			if !ok {
+				return
+			}
+			switch v := msg.(type) {
+			case ctlJoin:
+				v.Reply <- joinResult{Err: ErrAuth}
+			case ctlReconnect:
+				v.Reply <- joinResult{Err: ErrAuth}
+			}
+			if !idle.Stop() {
+				select {
+				case <-idle.C:
+				default:
+				}
+			}
+			idle.Reset(10 * time.Second)
+		case <-idle.C:
+			return
+		}
+	}
+}
+
 func (m *Match) drainInboxAfterEnd() {
 	for {
 		select {

@@ -187,15 +187,12 @@ func (s *Server) handleMatch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	out := make(chan match.OutboundFrame, 64)
-	// Phase 5 §16.2: route to reconnect if the token belongs to a slot
-	// currently in DC-grace; otherwise fall back to the fresh-join path.
-	token := string(mj.Token)
+	// Phase 5 §16.2 (codex P5/iter6 #1): actor-side dispatch.
+	// handleJoin internally checks dcTokens and reroutes to the
+	// reconnect path; this eliminates the TOCTOU window in the
+	// dispatcher and keeps the net layer agnostic of slot state.
 	var pid sim.EntityID
-	if m.IsDCToken(token) {
-		pid, err = m.SubmitReconnect(token, out)
-	} else {
-		pid, err = m.SubmitJoin(token, out)
-	}
+	pid, err = m.SubmitJoin(string(mj.Token), out)
 	if err != nil {
 		_ = closeWith(c, CloseAuth)
 		return
