@@ -81,15 +81,14 @@ type Lobby struct {
 	// them lobby-scoped and let each match's NewSim accept them.
 	nextEntityID sim.EntityID
 
-	// Re-entrancy guard for broadcastRoomList. dropSession (reached from
-	// send() when a slow client's queue overflows mid-broadcast) frees the
-	// dropped client's room slot and re-broadcasts; without this guard that
-	// nested broadcast would recurse and re-send to healthy clients on every
-	// level. broadcasting marks an in-flight broadcast; a nested call sets
-	// broadcastDirty and returns, and the in-flight loop re-runs once with
-	// fresh state. Actor-owned (only Run() touches these).
-	broadcasting   bool
-	broadcastDirty bool
+	// roomsDirty is set when dropSession frees an OPEN-room slot for a
+	// force-dropped session. The room-list resync is deferred to the end of
+	// the current actor step (flushRoomsDirty) rather than broadcast inline:
+	// dropSession can run from inside send() during an in-flight broadcast
+	// fan-out, so a synchronous rebroadcast would nest inside that loop —
+	// overwriting the corrected list with the in-flight stale payload and
+	// amplifying outbound pressure. Actor-owned (only Run() touches it).
+	roomsDirty bool
 }
 
 // NewLobby constructs a Lobby actor.
@@ -216,11 +215,19 @@ func (l *Lobby) Run() {
 			return
 		case msg := <-l.in:
 			l.handle(msg)
+			// Coalesce deferred room-list resyncs: while a burst of
+			// control messages is still queued, hold off — one resync
+			// once the inbox drains covers them all and keeps a forced-
+			// drop storm from amplifying into a per-message fan-out.
+			if len(l.in) == 0 {
+				l.flushRoomsDirty()
+			}
 		case <-janitorTicker.C:
 			l.expireTokens()
 			l.expireIdleSessions()
 			l.sweepEmptyRooms()
 			l.sweepZeroPlayerMatches()
+			l.flushRoomsDirty()
 		}
 	}
 }
@@ -644,24 +651,23 @@ func (l *Lobby) buildRoomList() proto.RoomList {
 }
 
 func (l *Lobby) broadcastRoomList() {
-	// Re-entrancy guard: send() can drop a slow client mid-loop, and
-	// dropSession then re-broadcasts the freed slot. Coalesce that nested
-	// call into a single re-run with fresh state instead of recursing.
-	if l.broadcasting {
-		l.broadcastDirty = true
-		return
+	rl := l.buildRoomList()
+	for _, s := range l.sessions {
+		l.send(s, proto.LobbyRoomList, rl)
 	}
-	l.broadcasting = true
-	defer func() { l.broadcasting = false }()
-	for {
-		l.broadcastDirty = false
-		rl := l.buildRoomList()
-		for _, s := range l.sessions {
-			l.send(s, proto.LobbyRoomList, rl)
-		}
-		if !l.broadcastDirty {
-			return
-		}
+}
+
+// flushRoomsDirty emits an authoritative room-list resync if a session was
+// force-dropped from an OPEN room during the current actor step (see
+// roomsDirty). Deferred to here so the resync is the LAST frame clients
+// receive — it never nests inside an in-flight broadcast fan-out, so it
+// cannot be overwritten by an already-built stale delta. The loop converges
+// because the resync runs outside any fan-out and each additional drop it
+// triggers removes a session, shrinking l.sessions.
+func (l *Lobby) flushRoomsDirty() {
+	for l.roomsDirty {
+		l.roomsDirty = false
+		l.broadcastRoomList()
 	}
 }
 
@@ -709,9 +715,10 @@ func (l *Lobby) dropSession(s *Session, _ string) {
 	if s.roomID != "" {
 		if r, ok := l.rooms[s.roomID]; ok && r.State == RoomOpen {
 			l.removeFromRoomMembership(s, r)
-			// broadcastRoomList coalesces if we are already inside one
-			// (dropSession is reachable from send() during a broadcast).
-			l.broadcastRoomList()
+			// Defer the resync to flushRoomsDirty (end of the actor step):
+			// see roomsDirty's doc. The membership mutation above already
+			// frees the slot and makes the room GC-able regardless.
+			l.roomsDirty = true
 		}
 	}
 }

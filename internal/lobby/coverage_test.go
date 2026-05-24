@@ -258,6 +258,14 @@ func TestLobby_DropSessionFreesOpenRoomSlot(t *testing.T) {
 	if _, ok := drainUntil(t, outB, proto.LobbyRoomList, 500*time.Millisecond); !ok {
 		t.Fatal("B never saw its join confirmation")
 	}
+
+	// D is a healthy connected observer; its initial roomList shows the
+	// room with two members. After B is dropped, D must receive a corrected
+	// roomList (the deferred resync), proving the freed slot reaches live
+	// clients — not just a later snapshot probe.
+	d, outD := connect(t, l)
+	helloAndDrain(t, l, d, outD, "Dave")
+
 	if got := snapshotRooms(t, l)[rid].Players; got != 2 {
 		t.Fatalf("room players = %d before drop, want 2", got)
 	}
@@ -291,9 +299,31 @@ func TestLobby_DropSessionFreesOpenRoomSlot(t *testing.T) {
 		t.Fatal("B was not dropped on full queue")
 	}
 
-	// The slot is freed: A's room is back to a single member (host A).
-	if got := snapshotRooms(t, l)[rid].Players; got != 1 {
-		t.Fatalf("room players = %d after drop, want 1 (phantom member not removed)", got)
+	// The healthy observer D receives the corrected room-list resync
+	// showing the freed slot (Players == 1).
+	deadline := time.Now().Add(500 * time.Millisecond)
+	got := -1
+	for time.Now().Before(deadline) {
+		o, ok := drainUntil(t, outD, proto.LobbyRoomList, 500*time.Millisecond)
+		if !ok {
+			break
+		}
+		for _, r := range o.Payload.(proto.RoomList).Rooms {
+			if r.ID == rid {
+				got = r.Players
+			}
+		}
+		if got == 1 {
+			break
+		}
+	}
+	if got != 1 {
+		t.Fatalf("observer D saw room players = %d after drop, want 1 (phantom member not removed)", got)
+	}
+
+	// And a fresh snapshot agrees: the room is back to a single member.
+	if p := snapshotRooms(t, l)[rid].Players; p != 1 {
+		t.Fatalf("snapshot room players = %d after drop, want 1", p)
 	}
 }
 
