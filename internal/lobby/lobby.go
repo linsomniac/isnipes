@@ -80,6 +80,16 @@ type Lobby struct {
 	// must be globally unique within the (sim Config) check; we keep
 	// them lobby-scoped and let each match's NewSim accept them.
 	nextEntityID sim.EntityID
+
+	// Re-entrancy guard for broadcastRoomList. dropSession (reached from
+	// send() when a slow client's queue overflows mid-broadcast) frees the
+	// dropped client's room slot and re-broadcasts; without this guard that
+	// nested broadcast would recurse and re-send to healthy clients on every
+	// level. broadcasting marks an in-flight broadcast; a nested call sets
+	// broadcastDirty and returns, and the in-flight loop re-runs once with
+	// fresh state. Actor-owned (only Run() touches these).
+	broadcasting   bool
+	broadcastDirty bool
 }
 
 // NewLobby constructs a Lobby actor.
@@ -423,6 +433,19 @@ func (l *Lobby) handleLeaveRoom(s *Session) {
 }
 
 func (l *Lobby) removeFromRoom(s *Session, room *Room) {
+	l.removeFromRoomMembership(s, room)
+	l.broadcastRoomList()
+	// Phase 6 §11: delta envelope alongside the legacy full-list.
+	l.broadcastRoomDelta(proto.LobbyRoomUpdated, room)
+}
+
+// removeFromRoomMembership drops s from room.Members and applies the
+// host-transfer + empty-stamp bookkeeping WITHOUT broadcasting. Callers
+// running outside an in-flight broadcast (removeFromRoom) follow this with
+// the broadcasts; the drop path (dropSession), which can be reached from
+// inside send() during a broadcast, relies on broadcastRoomList's
+// re-entrancy coalescing instead.
+func (l *Lobby) removeFromRoomMembership(s *Session, room *Room) {
 	for i, pid := range room.Members {
 		if pid == string(s.ID) {
 			room.Members = append(room.Members[:i], room.Members[i+1:]...)
@@ -430,27 +453,15 @@ func (l *Lobby) removeFromRoom(s *Session, room *Room) {
 		}
 	}
 	s.roomID = ""
-	// Phase 6 §7.4: host transfer on leaveRoom. If the leaver was the
-	// host AND there are remaining members, the oldest-joined member
-	// becomes the new host (Members is kept in join order).
-	closed := false
-	if room.Host == string(s.ID) {
-		if len(room.Members) > 0 {
-			room.Host = room.Members[0]
-		}
+	// Phase 6 §7.4: host transfer. If the leaver was the host AND there
+	// are remaining members, the oldest-joined member becomes the new host
+	// (Members is kept in join order).
+	if room.Host == string(s.ID) && len(room.Members) > 0 {
+		room.Host = room.Members[0]
 	}
 	if len(room.Members) == 0 {
-		// Truly empty — leave the room for the §10.1 sweep to GC.
-		// (Or immediately close if the empty state is permanent.) For
-		// now stamp EmptySince and let the janitor handle it.
+		// Truly empty — stamp EmptySince and let the §10.1 sweep GC it.
 		room.EmptySince = l.clock()
-	}
-	l.broadcastRoomList()
-	// Phase 6 §11: delta envelope alongside the legacy full-list.
-	if closed {
-		l.broadcastRoomRemoved(room.ID)
-	} else {
-		l.broadcastRoomDelta(proto.LobbyRoomUpdated, room)
 	}
 }
 
@@ -633,9 +644,24 @@ func (l *Lobby) buildRoomList() proto.RoomList {
 }
 
 func (l *Lobby) broadcastRoomList() {
-	rl := l.buildRoomList()
-	for _, s := range l.sessions {
-		l.send(s, proto.LobbyRoomList, rl)
+	// Re-entrancy guard: send() can drop a slow client mid-loop, and
+	// dropSession then re-broadcasts the freed slot. Coalesce that nested
+	// call into a single re-run with fresh state instead of recursing.
+	if l.broadcasting {
+		l.broadcastDirty = true
+		return
+	}
+	l.broadcasting = true
+	defer func() { l.broadcasting = false }()
+	for {
+		l.broadcastDirty = false
+		rl := l.buildRoomList()
+		for _, s := range l.sessions {
+			l.send(s, proto.LobbyRoomList, rl)
+		}
+		if !l.broadcastDirty {
+			return
+		}
 	}
 }
 
@@ -672,6 +698,22 @@ func (l *Lobby) dropSession(s *Session, _ string) {
 		close(s.out)
 	})
 	delete(l.sessions, s.ID)
+	// §7.1 parity with handleDisconnect: a force-dropped client (queue
+	// overflow in send, or sendErrorAndClose) that was in a pre-match
+	// (OPEN) room must free its slot — otherwise a phantom member keeps
+	// the room un-GC-able (sweepEmptyRooms only reaps len(Members)==0) and
+	// the slot stays occupied forever. STARTING/IN_MATCH/CLOSED rooms are
+	// owned by the match lifecycle and left untouched, exactly as
+	// handleDisconnect does. We delete from l.sessions first so the
+	// broadcast below skips the now-closed session.
+	if s.roomID != "" {
+		if r, ok := l.rooms[s.roomID]; ok && r.State == RoomOpen {
+			l.removeFromRoomMembership(s, r)
+			// broadcastRoomList coalesces if we are already inside one
+			// (dropSession is reachable from send() during a broadcast).
+			l.broadcastRoomList()
+		}
+	}
 }
 
 // Helpers.

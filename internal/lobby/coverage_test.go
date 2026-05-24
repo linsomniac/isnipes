@@ -229,6 +229,74 @@ func TestLobby_ConnectAfterStop(t *testing.T) {
 	}
 }
 
+// TestLobby_DropSessionFreesOpenRoomSlot is the regression test for the
+// phantom-member bug: a client force-dropped (outbound queue overflow)
+// while it is a member of an OPEN room must have its slot freed, exactly
+// as an explicit disconnect would. Before the fix, dropSession deleted the
+// session from l.sessions but left it in room.Members, so the slot stayed
+// occupied and sweepEmptyRooms could never GC the room.
+func TestLobby_DropSessionFreesOpenRoomSlot(t *testing.T) {
+	l, _, done, _ := newTestLobby(t)
+	defer func() { l.Stop(); <-done }()
+
+	// Host A creates a 4-player room.
+	a, outA := connect(t, l)
+	helloAndDrain(t, l, a, outA, "Alice")
+	sendEnvelope(t, l, a.ID, proto.LobbyCreateRoom, proto.CreateRoom{
+		Name: "R", Max: 4, Level: proto.Level{Letter: "A", Number: 1},
+	})
+	rl, ok := drainRoomListWithCount(t, outA, 1, 500*time.Millisecond)
+	if !ok || len(rl.Rooms) == 0 {
+		t.Fatal("no roomList after create")
+	}
+	rid := rl.Rooms[0].ID
+
+	// B joins → the room now has two members.
+	b, outB := connect(t, l)
+	helloAndDrain(t, l, b, outB, "Bob")
+	sendEnvelope(t, l, b.ID, proto.LobbyJoinRoom, proto.JoinRoom{RoomID: rid})
+	if _, ok := drainUntil(t, outB, proto.LobbyRoomList, 500*time.Millisecond); !ok {
+		t.Fatal("B never saw its join confirmation")
+	}
+	if got := snapshotRooms(t, l)[rid].Players; got != 2 {
+		t.Fatalf("room players = %d before drop, want 2", got)
+	}
+
+	// Quiesce B's queue, then saturate it so the next broadcast to B
+	// overflows. snapshotRooms above round-tripped through the actor, so
+	// every send queued for B has already landed in outB by now.
+	for draining := true; draining; {
+		select {
+		case <-outB:
+		case <-time.After(100 * time.Millisecond):
+			draining = false
+		}
+	}
+	for i := 0; i < cap(outB); i++ {
+		outB <- Outbound{}
+	}
+
+	// A second client creates a room; the room_added delta is broadcast to
+	// every session, including the saturated B → send(B) overflows →
+	// dropSession(B) runs while B is still a room member.
+	c, outC := connect(t, l)
+	helloAndDrain(t, l, c, outC, "Carol")
+	sendEnvelope(t, l, c.ID, proto.LobbyCreateRoom, proto.CreateRoom{
+		Name: "R2", Max: 4, Level: proto.Level{Letter: "A", Number: 1},
+	})
+
+	select {
+	case <-b.closed:
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("B was not dropped on full queue")
+	}
+
+	// The slot is freed: A's room is back to a single member (host A).
+	if got := snapshotRooms(t, l)[rid].Players; got != 1 {
+		t.Fatalf("room players = %d after drop, want 1 (phantom member not removed)", got)
+	}
+}
+
 // TestLobby_SendDropsOnFullQueue: when a session's outbound queue is full,
 // send drops the session (closes closed + out). A 1-slot queue overflows on
 // the second frame of the hello reply (welcome, then roomList).
