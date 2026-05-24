@@ -385,7 +385,10 @@ func phase5LSConfig() Config {
 		Width:     60,
 		Height:    40,
 		PlayerIDs: []EntityID{1, 2, 3, 4},
-		// LevelLetter == 0 ⇒ free-for-all: 3 lives, no snipes/generators.
+		// LevelLetter == 0 ⇒ free-for-all: 3 lives, no snipes. NoGenerators
+		// mirrors what startOrAbort sets for a zero-level PvP match in
+		// production (match.go), so the fixture exercises the real PvP map.
+		NoGenerators: true,
 	}
 }
 

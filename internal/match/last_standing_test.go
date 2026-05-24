@@ -29,12 +29,15 @@ func TestMatchLastStandingE2E(t *testing.T) {
 	inputs := readReplayInputsAt(t, filepath.Join("..", "sim", "testdata", "replays", "phase5_last_standing.inputs"))
 
 	// Free-for-all sim: Config.LevelLetter == 0 ⇒ 3 lives per player, no
-	// snipes, no generators (so PVE_COMPLETE can never apply).
+	// snipes. NoGenerators mirrors what startOrAbort sets for a zero-level
+	// PvP match (match.go), so this replays the production PvP map and
+	// PVE_COMPLETE can never apply.
 	cfg := sim.Config{
-		Seed:      0xDEADBEEF,
-		Width:     60,
-		Height:    40,
-		PlayerIDs: []sim.EntityID{1, 2, 3, 4},
+		Seed:         0xDEADBEEF,
+		Width:        60,
+		Height:       40,
+		PlayerIDs:    []sim.EntityID{1, 2, 3, 4},
+		NoGenerators: true,
 	}
 	s, err := sim.NewSim(cfg)
 	if err != nil {

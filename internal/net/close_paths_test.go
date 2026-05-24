@@ -214,16 +214,32 @@ func TestNet_MatchHandshakeTimeout(t *testing.T) {
 
 	c, cancel := dialMatch(t, ts, matchID)
 	defer cancel()
-	ctx := context.Background()
-	// The server's read-context expiry (HandshakeTimeout) trips the IDLE
-	// close branch in handleMatch. nhooyr tears the socket down on read-
-	// context cancellation, so the wire result is an abnormal closure
-	// rather than a clean 4007 frame; we assert only that the connection
-	// is closed well within the 5s default handshake window.
+
+	// Never send the MatchJoin first frame: the server's read-context
+	// expiry (HandshakeTimeout=200ms) trips the IDLE close branch in
+	// handleMatch. nhooyr tears the socket down on read-context
+	// cancellation, so the wire result is an abnormal closure rather than a
+	// clean 4007 frame — we cannot assert the exact CloseIdle code here.
+	//
+	// What we DO assert is that the *server* ended the read promptly. We
+	// give our own Read a 2s budget (10× the handshake timeout); if the
+	// server honors the timeout, Read returns an error long before our
+	// context expires (readCtx.Err() == nil). If instead our own deadline
+	// fired (readCtx.Err() != nil), the server failed to close and the test
+	// must fail rather than pass on the client giving up.
+	readCtx, readCancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer readCancel()
 	start := time.Now()
-	_ = readUntilClose(t, c, ctx)
-	if elapsed := time.Since(start); elapsed > 2*time.Second {
-		t.Fatalf("handshake-timeout close took %v, want < 2s", elapsed)
+	_, _, err := c.Read(readCtx)
+	elapsed := time.Since(start)
+	if err == nil {
+		t.Fatal("expected the server to close the idle handshake connection")
+	}
+	if readCtx.Err() != nil {
+		t.Fatalf("client read deadline (%v) expired before the server closed: server did not honor HandshakeTimeout", elapsed)
+	}
+	if elapsed > time.Second {
+		t.Fatalf("handshake-timeout close took %v, want < 1s (HandshakeTimeout=200ms)", elapsed)
 	}
 }
 
