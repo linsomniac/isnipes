@@ -70,7 +70,10 @@ func TestLobby_JoinRoomRejections(t *testing.T) {
 		sendEnvelope(t, l, a.ID, proto.LobbyCreateRoom, proto.CreateRoom{
 			Name: "R", Max: 2, Level: proto.Level{Letter: "A", Number: 1},
 		})
-		rl, _ := drainRoomListWithCount(t, outA, 1, 500*time.Millisecond)
+		rl, ok := drainRoomListWithCount(t, outA, 1, 500*time.Millisecond)
+		if !ok || len(rl.Rooms) == 0 {
+			t.Fatal("no roomList after create")
+		}
 		rid := rl.Rooms[0].ID
 		sendEnvelope(t, l, b.ID, proto.LobbyJoinRoom, proto.JoinRoom{RoomID: rid})
 		drainUntil(t, outB, proto.LobbyRoomList, 500*time.Millisecond)
@@ -91,7 +94,9 @@ func TestLobby_JoinRoomRejections(t *testing.T) {
 		// Host starts → room transitions to STARTING; a late joiner is
 		// refused with ROOM_GONE ("not accepting joins").
 		sendEnvelope(t, l, a.ID, proto.LobbyStartMatch, proto.StartMatch{RoomID: rid})
-		drainUntil(t, outA, proto.LobbyMatchStarted, 500*time.Millisecond)
+		if _, ok := drainUntil(t, outA, proto.LobbyMatchStarted, 500*time.Millisecond); !ok {
+			t.Fatal("host never received matchStarted; room never reached STARTING")
+		}
 		expectError(t, l, c.ID, outC, proto.LobbyJoinRoom,
 			proto.JoinRoom{RoomID: rid}, proto.LobbyErrRoomGone)
 	})
@@ -138,7 +143,10 @@ func TestLobby_StartMatchRejections(t *testing.T) {
 		sendEnvelope(t, l, a.ID, proto.LobbyCreateRoom, proto.CreateRoom{
 			Name: "R", Max: 4, Level: proto.Level{Letter: "A", Number: 1},
 		})
-		rl, _ := drainRoomListWithCount(t, outA, 1, 500*time.Millisecond)
+		rl, ok := drainRoomListWithCount(t, outA, 1, 500*time.Millisecond)
+		if !ok || len(rl.Rooms) == 0 {
+			t.Fatal("no roomList after create")
+		}
 		rid := rl.Rooms[0].ID
 		expectError(t, l, a.ID, outA, proto.LobbyStartMatch,
 			proto.StartMatch{RoomID: rid}, proto.LobbyErrBadRequest)
@@ -186,7 +194,15 @@ func TestLobby_DisconnectDuringMatchKeepsRoom(t *testing.T) {
 	helloAndDrain(t, l, b, outB, "Bob")
 	rid := createAndJoinRoom(t, l, a, b, outA, outB)
 	sendEnvelope(t, l, a.ID, proto.LobbyStartMatch, proto.StartMatch{RoomID: rid})
-	drainUntil(t, outA, proto.LobbyMatchStarted, 500*time.Millisecond)
+	if _, ok := drainUntil(t, outA, proto.LobbyMatchStarted, 500*time.Millisecond); !ok {
+		t.Fatal("no matchStarted; room never reached STARTING")
+	}
+	// Confirm the room is in the non-open STARTING state BEFORE the
+	// disconnect, so this test genuinely exercises handleDisconnect's
+	// non-open branch rather than the open-room removeFromRoom path.
+	if st := snapshotRooms(t, l)[rid].State; st != "STARTING" {
+		t.Fatalf("room state = %q before disconnect, want STARTING", st)
+	}
 
 	// Host drops their lobby connection mid-match.
 	l.Disconnect(a.ID)
