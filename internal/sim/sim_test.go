@@ -163,6 +163,214 @@ func TestDeterminism_GoldenFingerprint_Level9(t *testing.T) {
 	}
 }
 
+// phase5PvPSeed and phase5PvPConfig pin the Phase 5 §19 4-player PvP
+// fixture: a non-PvE map (NoGenerators ⇒ no snipes) at level A1
+// (PlayerLives = 9). The seed was chosen so the recorded "hunt p4"
+// playthrough drives player 4 to zero lives (→ dead-cam) while the
+// other three survive — exercising kills, respawns, the spawn-invuln
+// window, and elimination.
+const phase5PvPSeed uint32 = 0xDEADBEEF
+
+func phase5PvPConfig() Config {
+	return Config{
+		Seed:         phase5PvPSeed,
+		Width:        60,
+		Height:       40,
+		PlayerIDs:    []EntityID{1, 2, 3, 4},
+		LevelLetter:  'A',
+		LevelNumber:  1,
+		NoGenerators: true,
+	}
+}
+
+// TestDeterminism_Phase5_4PPvP is the Phase 5 DoD #5 golden replay. The
+// committed phase5_4p_pvp.inputs is replayed against a fresh sim and the
+// final fingerprint must match phase5_4p_pvp.hash byte-for-byte. Run
+// with -update to regenerate both (the input stream is produced by a
+// BFS-driven recorded playthrough; see generatePhase5Inputs).
+func TestDeterminism_Phase5_4PPvP(t *testing.T) {
+	s, err := NewSim(phase5PvPConfig())
+	if err != nil {
+		t.Fatalf("NewSim: %v", err)
+	}
+	inputsPath := filepath.Join("testdata", "replays", "phase5_4p_pvp.inputs")
+	hashPath := filepath.Join("testdata", "replays", "phase5_4p_pvp.hash")
+
+	if *updateGolden {
+		inputs := generatePhase5Inputs(t)
+		if err := writeReplayInputs(inputsPath, inputs); err != nil {
+			t.Fatalf("write inputs: %v", err)
+		}
+		for _, tick := range inputs {
+			if _, err := s.Tick(tick); err != nil {
+				t.Fatalf("tick err: %v", err)
+			}
+		}
+		fp := s.Fingerprint()
+		if err := os.WriteFile(hashPath, []byte(hex.EncodeToString(fp[:])+"\n"), 0o644); err != nil {
+			t.Fatalf("write hash: %v", err)
+		}
+		return
+	}
+
+	inputs, err := readReplayInputs(inputsPath)
+	if err != nil {
+		t.Fatalf("read inputs: %v (run with -update)", err)
+	}
+	for i, tick := range inputs {
+		if _, err := s.Tick(tick); err != nil {
+			t.Fatalf("tick %d: %v", i, err)
+		}
+	}
+	wantHex, err := os.ReadFile(hashPath)
+	if err != nil {
+		t.Fatalf("read hash: %v", err)
+	}
+	want := string(wantHex)
+	if len(want) > 0 && want[len(want)-1] == '\n' {
+		want = want[:len(want)-1]
+	}
+	fp := s.Fingerprint()
+	got := hex.EncodeToString(fp[:])
+	if want != got {
+		t.Fatalf("fingerprint: want %s, got %s", want, got)
+	}
+}
+
+// phase5FixtureTicks is the length of the recorded PvP fixture. Longer
+// than the §19 "~2000" estimate because driving one player through 9
+// real PvP deaths (with 90-tick respawn + 60-tick spawn-invuln per
+// cycle, plus walk-back time) needs the extra budget. See the spec-issue
+// note in the phase loop scratchpad.
+const phase5FixtureTicks = 5000
+
+// generatePhase5Inputs records a deterministic 4-player PvP playthrough.
+// Players 1–3 path (BFS, center-then-turn steering) to a fixed central
+// rendezvous and fire at player 4; player 4 walks to the rendezvous and
+// holds. The recorded input stream is static — replaying it on a fresh
+// sim with the same seed reproduces identical state, so the fixture is
+// byte-for-byte deterministic. Only invoked under -update.
+func generatePhase5Inputs(t *testing.T) [][]PlayerInput {
+	t.Helper()
+	s, err := NewSim(phase5PvPConfig())
+	if err != nil {
+		t.Fatalf("NewSim: %v", err)
+	}
+	out := make([][]PlayerInput, phase5FixtureTicks)
+	for i := 0; i < phase5FixtureTicks; i++ {
+		out[i] = phase5TickInputs(s, i)
+		if _, err := s.Tick(out[i]); err != nil {
+			t.Fatalf("record tick %d: %v", i, err)
+		}
+	}
+	return out
+}
+
+// phase5TickInputs computes one tick of the recorded playthrough from
+// the live sim state. Deterministic: it only reads entity positions and
+// the (immutable) maze, and iterates a fixed player-ID order.
+func phase5TickInputs(s *Sim, i int) []PlayerInput {
+	ids := [4]EntityID{1, 2, 3, 4}
+	pos := make(map[EntityID]Entity, 4)
+	for _, e := range s.Entities() {
+		if e.Kind == KindPlayer && e.Flags&FlagDead == 0 {
+			pos[e.ID] = e
+		}
+	}
+	rx, ry := phase5Rendezvous(s)
+	victim, haveVictim := pos[4]
+	out := make([]PlayerInput, 0, 4)
+	for j, id := range ids {
+		e, alive := pos[id]
+		if !alive {
+			continue
+		}
+		tx, ty := int(e.X)/subtilePerTile, int(e.Y)/subtilePerTile
+		dist := absInt(tx-rx) + absInt(ty-ry)
+		var dir, fire Dir
+		if dist > 1 {
+			if nx, ny, ok := PathNext(s.maze, tx, ty, rx, ry, 4096); ok {
+				dir = steerAlongPath(e.X, e.Y, tx, ty, nx, ny)
+			}
+		}
+		if id == 4 {
+			out = append(out, PlayerInput{PlayerID: id, Dir: dir, ClientTick: uint16(i)})
+			continue
+		}
+		if haveVictim {
+			fire = dir8Toward(e.X, e.Y, victim.X, victim.Y)
+		} else {
+			fire = Dir(((i + j*2) % 8) + 1)
+		}
+		out = append(out, PlayerInput{PlayerID: id, Dir: dir, FireDir: fire, ClientTick: uint16(i)})
+	}
+	return out
+}
+
+// phase5Rendezvous returns the walkable tile nearest the map centre.
+func phase5Rendezvous(s *Sim) (int, int) {
+	cx, cy := s.Width()/2, s.Height()/2
+	for r := 0; r < s.Width()+s.Height(); r++ {
+		for dy := -r; dy <= r; dy++ {
+			for dx := -r; dx <= r; dx++ {
+				x, y := cx+dx, cy+dy
+				if x <= 0 || y <= 0 || x >= s.Width()-1 || y >= s.Height()-1 {
+					continue
+				}
+				if s.maze.at(x, y) != TileWall {
+					return x, y
+				}
+			}
+		}
+	}
+	return cx, cy
+}
+
+// steerAlongPath converts a BFS next-tile into a movement Dir with
+// "center-then-turn" alignment: before turning onto the cross axis the
+// player first slides to the current tile centre on that axis, so its
+// hitbox (half-extent 96, leaving ±32 subtile corridor clearance)
+// clears the corner. Without this the player jams against a wall when it
+// tries to turn while off-centre.
+func steerAlongPath(x, y int32, tx, ty, nx, ny int) Dir {
+	const center = subtilePerTile / 2
+	const align = 24 // < (128-96)=32 clearance
+	curCX := int32(tx*subtilePerTile + center)
+	curCY := int32(ty*subtilePerTile + center)
+	if nx != tx {
+		if y-curCY > align {
+			return DirN
+		}
+		if curCY-y > align {
+			return DirS
+		}
+		if nx > tx {
+			return DirE
+		}
+		return DirW
+	}
+	if ny != ty {
+		if x-curCX > align {
+			return DirW
+		}
+		if curCX-x > align {
+			return DirE
+		}
+		if ny > ty {
+			return DirS
+		}
+		return DirN
+	}
+	return DirIdle
+}
+
+func absInt(x int) int {
+	if x < 0 {
+		return -x
+	}
+	return x
+}
+
 // TestDeterminism_SnipeAI satisfies DoD #6: two sims with identical
 // Config (incl. LevelLetter/Number) and identical inputs evolve to
 // identical fingerprints at every tick.

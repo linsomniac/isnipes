@@ -1,0 +1,27 @@
+{
+  "final_tick": 18000,
+  "reason": 3,
+  "winner_id_or_0": 1,
+  "entries": [
+    {
+      "player_id": 1,
+      "score": 225,
+      "lives_remaining": 9
+    },
+    {
+      "player_id": 2,
+      "score": 85,
+      "lives_remaining": 1
+    },
+    {
+      "player_id": 3,
+      "score": 135,
+      "lives_remaining": 6
+    },
+    {
+      "player_id": 4,
+      "score": -45,
+      "lives_remaining": 0
+    }
+  ]
+}
