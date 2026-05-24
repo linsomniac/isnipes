@@ -72,6 +72,47 @@ export function sortEntitiesForDraw(entities: readonly Entity[]): Entity[] {
   return [...entities].sort((a, b) => (a.y - b.y) || (a.id - b.id));
 }
 
+// One drawable: world position, the entity kind, and the resolved color.
+// `selfRank` (0 for non-self, 1 for self) breaks y-ties so the local
+// player draws just above a co-located other for visibility, while still
+// honoring the ascending-y depth order against entities further south.
+export interface DrawItem {
+  x: number;
+  y: number;
+  kind: number;
+  color: string;
+}
+
+// colorForKind picks the palette slot for an entity kind (1=player,
+// 2=generator, 3=projectile, 4=snipe; see internal/sim/config.go).
+export function colorForKind(kind: number, palette: Palette): string {
+  switch (kind) {
+    case 2: return palette.generator;
+    case 3: return palette.projectile;
+    case 4: return palette.snipe;
+    default: return palette.player;
+  }
+}
+
+// buildDrawList merges self + non-self entities into one ascending-y draw
+// order (DoD #7 invariant applies to the local player too). Self is
+// colored with palette.self and, on a y-tie, sorts after a co-located
+// other (selfRank) so it stays visible without breaking depth ordering.
+export function buildDrawList(s: RenderState, palette: Palette): DrawItem[] {
+  const items: (DrawItem & { id: number; selfRank: number })[] = [];
+  for (const e of s.entities) {
+    items.push({ x: e.x, y: e.y, kind: e.kind, color: colorForKind(e.kind, palette), id: e.id, selfRank: 0 });
+  }
+  if (s.selfPredicted) {
+    items.push({
+      x: s.selfPredicted.x, y: s.selfPredicted.y, kind: 1,
+      color: palette.self, id: s.selfId, selfRank: 1,
+    });
+  }
+  items.sort((a, b) => (a.y - b.y) || (a.selfRank - b.selfRank) || (a.id - b.id));
+  return items.map(({ x, y, kind, color }) => ({ x, y, kind, color }));
+}
+
 // ---- maze cache ----
 
 // A CacheImage is anything ctx.drawImage accepts (OffscreenCanvas or a
@@ -184,12 +225,10 @@ export class Renderer {
       ctx.drawImage(this.cache, sxPx, syPx, cam.w, cam.h, 0, 0, cam.w, cam.h);
     }
 
-    // Draw non-self entities (y-sorted) then self on top.
-    for (const e of sortEntitiesForDraw(s.entities)) {
-      this.drawEntity(cam, e.x, e.y, e.kind, this.palette.player);
-    }
-    if (s.selfPredicted) {
-      this.drawEntity(cam, s.selfPredicted.x, s.selfPredicted.y, /*player*/ 1, this.palette.self);
+    // Draw all entities (self included) in one ascending-y order so the
+    // local player is correctly occluded by / occludes others by depth.
+    for (const item of buildDrawList(s, this.palette)) {
+      this.drawEntity(cam, item.x, item.y, item.kind, item.color);
     }
   }
 

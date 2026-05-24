@@ -74,6 +74,13 @@ describe("hud scoreboard", () => {
     expect(() => decodeScoreboard(good.subarray(0, good.length - 2))).toThrow();
   });
 
+  test("decodeScoreboard rejects trailing bytes", () => {
+    const good = encScoreboard(1, [{ id: 1, nick: "abc", lives: 1, score: 1 }]);
+    const padded = new Uint8Array(good.length + 3);
+    padded.set(good);
+    expect(() => decodeScoreboard(padded)).toThrow(/trailing/);
+  });
+
   test("orderRows is stable wrt input copy (no mutation)", () => {
     const input = [{ id: 2, nick: "a", lives: 1, score: 1 }, { id: 1, nick: "b", lives: 1, score: 1 }];
     const out = orderRows(input);
@@ -115,6 +122,15 @@ describe("hud end-of-match", () => {
   test("TestHUD_WinnerLabelFallback for uncached id and no-winner", () => {
     expect(winnerLabel(0, new Map())).toBe("No single winner");
     expect(winnerLabel(5, new Map())).toBe("Player 5");
+  });
+
+  test("decodeMatchOver rejects trailing bytes (incl. zero-entry)", () => {
+    const good = encMatchOver(1, 2, 0, []); // zero entries
+    const padded = new Uint8Array(good.length + 4);
+    padded.set(good);
+    expect(() => decodeMatchOver(padded)).toThrow(/trailing/);
+    // a well-formed zero-entry frame still decodes.
+    expect(decodeMatchOver(good).entries).toHaveLength(0);
   });
 });
 

@@ -72,6 +72,7 @@ export function decodeScoreboard(payload: Uint8Array): ScoreRow[] {
     const score = dv.getInt32(off, true); off += 4;
     rows.push({ id, nick, lives, score });
   }
+  if (off !== payload.length) throw new ProtocolError("scoreboard trailing bytes");
   return orderRows(rows);
 }
 
@@ -103,6 +104,7 @@ export function decodeMatchOver(payload: Uint8Array): MatchOverData {
     const lives = dv.getUint8(off); off += 1;
     entries.push({ id, score, lives });
   }
+  if (off !== payload.length) throw new ProtocolError("matchover trailing bytes");
   return { finalTick, reason, winnerId, entries };
 }
 

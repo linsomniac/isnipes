@@ -4,9 +4,10 @@
 
 import { describe, expect, test, vi } from "vitest";
 import {
-  computeCamera, worldToScreen, sortEntitiesForDraw, Renderer,
+  computeCamera, worldToScreen, sortEntitiesForDraw, buildDrawList, colorForKind, Renderer,
   TILE_PX, PX_PER_SUBTILE, type RenderCtx, type RenderState,
 } from "../src/render.js";
+import { COLORBLIND_PALETTE } from "../src/palette.js";
 import { SUBTILE_PER_TILE, TileCode, type MazeView } from "../src/sim.js";
 import { DEFAULT_PALETTE } from "../src/palette.js";
 import { emptyHudModel } from "../src/hud.js";
@@ -71,6 +72,35 @@ describe("render geometry", () => {
     ];
     const sorted = sortEntitiesForDraw(ents);
     expect(sorted.map((e) => e.id)).toEqual([1, 2, 3]);
+  });
+
+  test("buildDrawList y-sorts SELF together with others (not always last)", () => {
+    const state: RenderState = {
+      map: openMaze(60, 40), selfId: 100,
+      // self at y=200; one entity north (y=100), one south (y=300).
+      selfPredicted: { x: 0, y: 200, facing: 0, flags: 0 },
+      entities: [
+        { id: 1, kind: 4, hp: 1, facing: 0, flags: 0, x: 0, y: 100, vx: 0, vy: 0 },
+        { id: 2, kind: 2, hp: 1, facing: 0, flags: 0, x: 0, y: 300, vx: 0, vy: 0 },
+      ],
+      renderTick: 0,
+    };
+    const list = buildDrawList(state, DEFAULT_PALETTE);
+    // Order by y: north entity, then self, then south entity.
+    expect(list.map((d) => d.y)).toEqual([100, 200, 300]);
+    // Self carries the self color + player kind.
+    expect(list[1].color).toBe(DEFAULT_PALETTE.self);
+    expect(list[1].kind).toBe(1);
+  });
+
+  test("colorForKind distinguishes entity kinds (per palette)", () => {
+    expect(colorForKind(1, DEFAULT_PALETTE)).toBe(DEFAULT_PALETTE.player);
+    expect(colorForKind(2, DEFAULT_PALETTE)).toBe(DEFAULT_PALETTE.generator);
+    expect(colorForKind(3, DEFAULT_PALETTE)).toBe(DEFAULT_PALETTE.projectile);
+    expect(colorForKind(4, DEFAULT_PALETTE)).toBe(DEFAULT_PALETTE.snipe);
+    // a different palette yields different snipe/generator colors.
+    expect(colorForKind(4, COLORBLIND_PALETTE)).toBe(COLORBLIND_PALETTE.snipe);
+    expect(colorForKind(4, COLORBLIND_PALETTE)).not.toBe(DEFAULT_PALETTE.snipe);
   });
 });
 
