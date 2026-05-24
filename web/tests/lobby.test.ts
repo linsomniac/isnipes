@@ -105,6 +105,43 @@ describe("LobbyClient envelope dispatch", () => {
     ws.push({ t: "error", d: { code: "BAD_LEVEL", message: "bad" } });
     expect(got?.code).toBe("BAD_LEVEL");
   });
+
+  test("TestLobby_LevelPresetsCallback (DoD #22): numeric letter → char, full table", () => {
+    const c = new LobbyClient();
+    const ws = new FakeWS();
+    let got: import("../src/lobby.js").LevelPreset[] | null = null;
+    c.onLevelPresets = (p) => (got = p);
+    c.attach(ws, "Alice", "v0", 0);
+    // Build the full 26x9=234-entry table; letter is a Go byte → JSON number.
+    const presets: unknown[] = [];
+    for (let li = 0; li < 26; li++) {
+      for (let n = 1; n <= 9; n++) {
+        presets.push({
+          letter: 65 + li, number: n, difficulty: li < 6 ? "Easy" : "Hard",
+          playerLives: Math.max(1, 10 - n), generators: 2, maxSnipes: n * 6,
+          description: "d",
+        });
+      }
+    }
+    ws.push({ t: "level_presets", d: { presets } });
+    expect(got).not.toBeNull();
+    expect(got!).toHaveLength(234);
+    expect(got![0].letter).toBe("A"); // 65 → "A"
+    expect(got![0].number).toBe(1);
+    expect(got![233].letter).toBe("Z"); // 90 → "Z"
+    expect(got![233].number).toBe(9);
+    expect(got![0].maxSnipes).toBe(6);
+  });
+
+  test("level_presets with malformed payload yields an empty list (no throw)", () => {
+    const c = new LobbyClient();
+    const ws = new FakeWS();
+    let got: unknown = "unset";
+    c.onLevelPresets = (p) => (got = p);
+    c.attach(ws, "Alice", "v0", 0);
+    ws.push({ t: "level_presets", d: { nope: true } });
+    expect(got).toEqual([]);
+  });
 });
 
 describe("LobbyClient outbound", () => {

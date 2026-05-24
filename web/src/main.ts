@@ -1,7 +1,7 @@
 // PHASE6.md §5.3 — top-level state machine. Handles boot,
 // deep-link auto-join, and the LOBBY ↔ IN_MATCH transitions.
 
-import { LobbyClient, type LobbyWS, parseDeepLinkRoom, type Welcome } from "./lobby.js";
+import { LobbyClient, type LobbyWS, parseDeepLinkRoom, type Welcome, type MatchStarted } from "./lobby.js";
 
 export type AppState = "LOBBY" | "IN_MATCH" | "POST_MATCH";
 
@@ -23,9 +23,11 @@ export class App {
   state: AppState = "LOBBY";
   lobby: LobbyClient;
 
-  // UI hook fired on welcome (after any deep-link auto-join is queued).
-  // The browser view layer sets this; headless callers may leave it null.
+  // UI hooks. The browser view layer sets these; headless callers may
+  // leave them null.
   onWelcome: ((w: Welcome) => void) | null = null;
+  onMatchStarted: ((ms: MatchStarted) => void) | null = null;
+  onStateChange: ((s: AppState) => void) | null = null;
 
   constructor(deps: AppDeps) {
     this.deps = deps;
@@ -47,5 +49,33 @@ export class App {
       }
       this.onWelcome?.(w);
     };
+    // App owns the LOBBY→IN_MATCH transition; the view layer's match
+    // connect logic runs via onMatchStarted (mirrors the onWelcome hook).
+    this.lobby.onMatchStarted = (ms) => {
+      this.toMatch(ms);
+      this.onMatchStarted?.(ms);
+    };
+  }
+
+  private setState(s: AppState): void {
+    if (this.state === s) return;
+    this.state = s;
+    this.onStateChange?.(s);
+  }
+
+  // toMatch: LOBBY → IN_MATCH on matchStarted.
+  toMatch(_ms?: MatchStarted): void {
+    if (this.state === "LOBBY") this.setState("IN_MATCH");
+  }
+
+  // endMatch: IN_MATCH → POST_MATCH on MatchOver (called by the view
+  // layer when it decodes the 0x08 frame off the match WS).
+  endMatch(): void {
+    if (this.state === "IN_MATCH") this.setState("POST_MATCH");
+  }
+
+  // backToLobby: POST_MATCH → LOBBY on the end-dialog back action.
+  backToLobby(): void {
+    this.setState("LOBBY");
   }
 }

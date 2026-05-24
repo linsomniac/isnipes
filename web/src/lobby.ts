@@ -90,6 +90,45 @@ export interface RoomRemoved {
   roomId: string;
 }
 
+// LevelPreset — PHASE6 §8.2 preview metadata (PHASE7 §10.4 picker). The
+// wire `letter` is a Go byte → a JSON number (65='A'); we expose it as a
+// single-char string.
+export interface LevelPreset {
+  letter: string;
+  number: number;
+  difficulty: string;
+  playerLives: number;
+  generators: number;
+  maxSnipes: number;
+  description: string;
+}
+
+interface LevelPresetWire {
+  letter: number;
+  number: number;
+  difficulty: string;
+  playerLives: number;
+  generators: number;
+  maxSnipes: number;
+  description: string;
+}
+
+// parseLevelPresets converts a level_presets envelope's `d` into
+// LevelPreset[], mapping the numeric letter code to a character.
+export function parseLevelPresets(d: unknown): LevelPreset[] {
+  const presets = (d as { presets?: LevelPresetWire[] })?.presets;
+  if (!Array.isArray(presets)) return [];
+  return presets.map((w) => ({
+    letter: String.fromCharCode(w.letter),
+    number: w.number,
+    difficulty: w.difficulty,
+    playerLives: w.playerLives,
+    generators: w.generators,
+    maxSnipes: w.maxSnipes,
+    description: w.description,
+  }));
+}
+
 // ---- WebSocket-like abstraction (mirrors netClient.ts pattern) ----
 
 export interface LobbyWS {
@@ -114,6 +153,7 @@ export class LobbyClient {
   onRoomListChange: LobbyEventHandler<RoomDescriptor[]> | null = null;
   onChatRelay: LobbyEventHandler<ChatRelay> | null = null;
   onMatchStarted: LobbyEventHandler<MatchStarted> | null = null;
+  onLevelPresets: LobbyEventHandler<LevelPreset[]> | null = null;
   onError: LobbyEventHandler<LobbyError> | null = null;
 
   // attach binds the client to a WebSocket-like and sends hello.
@@ -201,6 +241,9 @@ export class LobbyClient {
         break;
       case "matchStarted":
         if (this.onMatchStarted) this.onMatchStarted(env.d as MatchStarted);
+        break;
+      case "level_presets":
+        if (this.onLevelPresets) this.onLevelPresets(parseLevelPresets(env.d));
         break;
       case "error":
         if (this.onError) this.onError(env.d as LobbyError);
