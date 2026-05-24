@@ -77,6 +77,7 @@ interface UI {
   startBtn: HTMLButtonElement;
   roomList: HTMLElement;
   match: HTMLElement;
+  matchView: HTMLElement;
   status: HTMLElement;
 }
 
@@ -107,7 +108,7 @@ function buildDOM(): UI {
   match.append(matchView);
 
   document.body.append(status, connecting, lobby, match);
-  return { connecting, lobby, createBtn, myRoom, myRoomId, myRoomPlayers, startBtn, roomList, match, status };
+  return { connecting, lobby, createBtn, myRoom, myRoomId, myRoomPlayers, startBtn, roomList, match, matchView, status };
 }
 
 function el(tag: string, attrs: Record<string, string>, txt: string): HTMLElement {
@@ -129,12 +130,18 @@ function text(s: string): Text {
 
 // ---- match-WS (best-effort; the view does not depend on it) ----
 
-function connectMatch(ms: MatchStarted, schemaChecksum: number): void {
+function connectMatch(ms: MatchStarted, schemaChecksum: number, matchView: HTMLElement): void {
   try {
     const ws = new WebSocket(wsBase() + ms.gameSocketPath);
     ws.binaryType = "arraybuffer";
     const nc = new NetClient(ws as unknown as WebSocketLike);
-    nc.setEvents({ onOpen: () => nc.sendMatchJoin(schemaChecksum, ms.joinToken) });
+    nc.setEvents({
+      onOpen: () => nc.sendMatchJoin(schemaChecksum, ms.joinToken),
+      // The first server frame only arrives after a successful MatchJoin
+      // (a bad token is closed with AUTH before any frame). Marking the
+      // view here lets the e2e prove the match WS actually authenticated.
+      onFrame: () => matchView.setAttribute("data-match-connected", "true"),
+    });
     nc.start();
   } catch {
     /* the match-view wrapper is already shown; rendering comes in Phase 7 */
@@ -199,7 +206,7 @@ async function boot(): Promise<void> {
   app.lobby.onMatchStarted = (ms: MatchStarted) => {
     ui.lobby.hidden = true;
     ui.match.hidden = false;
-    connectMatch(ms, schemaChecksum);
+    connectMatch(ms, schemaChecksum, ui.matchView);
   };
 
   app.lobby.onError = (e) => {

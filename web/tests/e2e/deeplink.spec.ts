@@ -30,9 +30,14 @@ test("TestLobby_DeepLinkPlaywright_E2E", async ({ browser }) => {
     await expect(a.getByTestId("start-btn")).toBeEnabled();
     await a.getByTestId("start-btn").click();
 
-    // Both contexts navigate to the in-match view.
+    // Both contexts navigate to the in-match view AND authenticate to the
+    // match WS (the data-match-connected marker is only set once a server
+    // frame arrives, which a successful MatchJoin gates — a bad token is
+    // closed with AUTH before any frame).
     await expect(a.getByTestId("match-view")).toBeVisible();
     await expect(b.getByTestId("match-view")).toBeVisible();
+    await expect(a.getByTestId("match-view")).toHaveAttribute("data-match-connected", "true");
+    await expect(b.getByTestId("match-view")).toHaveAttribute("data-match-connected", "true");
   } finally {
     await ctxA.close();
     await ctxB.close();

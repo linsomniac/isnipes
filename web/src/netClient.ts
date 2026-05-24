@@ -84,7 +84,11 @@ export class NetClient {
   // sendMatchJoin: required first frame after WS upgrade. Returns
   // the encoded payload bytes for inspection by tests.
   sendMatchJoin(schemaChecksum: number, token: string): Uint8Array {
-    const payload = encodeMatchJoin({ schemaChecksum, token });
+    // The wire token is the raw bytes of the lobby-issued joinToken
+    // string (the Go server compares against []byte(joinToken)). Encode
+    // as UTF-8; passing the string straight to encodeMatchJoin would
+    // coerce each char to 0 via Uint8Array#set and fail server AUTH.
+    const payload = encodeMatchJoin({ schemaChecksum, token: new TextEncoder().encode(token) });
     const buf = encodeFrame(
       { type: MsgType.MatchJoin, flags: 0, seq: this.outboundSeq++, ack: 0xffff, len: payload.length },
       payload,

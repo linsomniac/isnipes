@@ -76,6 +76,16 @@ describe("NetClient", () => {
     expect(ws.sent).toHaveLength(1);
     // First byte = frame.type = MsgType.MatchJoin (0x00).
     expect(ws.sent[0][0]).toBe(MsgType.MatchJoin);
+    // The token must be the UTF-8 bytes of "tok123" — not a zeroed
+    // buffer (which a string→Uint8Array#set coercion would produce and
+    // which the server would reject with AUTH). Frame layout: 8-byte
+    // header, then MatchJoin payload {u32 schema, u8 token_len, token}.
+    const HDR = 8;
+    const frame = ws.sent[0];
+    const tokenLen = frame[HDR + 4];
+    expect(tokenLen).toBe(6);
+    const token = frame.slice(HDR + 5, HDR + 5 + tokenLen);
+    expect(Array.from(token)).toEqual(Array.from(new TextEncoder().encode("tok123")));
   });
 
   test("Ping ticker emits at 500ms intervals", () => {
