@@ -54,35 +54,24 @@ func drainNow(ch chan OutboundFrame) []OutboundFrame {
 	}
 }
 
-// findChatRelay returns the (event, text) of the first ChatRelay pair —
-// an Event{ChatRelay} immediately followed by a Chat text frame.
-func findChatRelay(frames []OutboundFrame) (proto.Event, string, bool) {
-	for i := 0; i < len(frames); i++ {
-		if frames[i].Type != proto.MsgEvent {
+// findChatRelay returns the (sender, text) of the first relay Chat frame —
+// a single self-attributing Chat (0x05) frame [u32 sender][u8 len][text].
+func findChatRelay(frames []OutboundFrame) (uint32, string, bool) {
+	for _, f := range frames {
+		if f.Type != proto.MsgChat {
 			continue
 		}
-		ev, err := proto.DecodeEvent(frames[i].Payload)
-		if err != nil || ev.Kind != uint8(proto.EventChatRelay) {
-			continue
+		if sender, text, ok := DecodeRelayChat(f.Payload); ok {
+			return uint32(sender), text, true
 		}
-		if i+1 < len(frames) && frames[i+1].Type == proto.MsgChat {
-			text, ok := DecodeChatText(frames[i+1].Payload)
-			if ok {
-				return ev, text, true
-			}
-		}
-		return ev, "", true
 	}
-	return proto.Event{}, "", false
+	return 0, "", false
 }
 
 func countChatRelays(frames []OutboundFrame) int {
 	n := 0
 	for _, f := range frames {
-		if f.Type != proto.MsgEvent {
-			continue
-		}
-		if ev, err := proto.DecodeEvent(f.Payload); err == nil && ev.Kind == uint8(proto.EventChatRelay) {
+		if f.Type == proto.MsgChat {
 			n++
 		}
 	}
@@ -94,15 +83,12 @@ func TestMatch_ChatRelayBroadcastsToAllSlots(t *testing.T) {
 	m.handleChat(ctlChat{PlayerID: 1, Text: "  hello world  "}) // trimmed
 
 	for name, ch := range map[string]chan OutboundFrame{"A": outA, "B": outB} {
-		ev, text, ok := findChatRelay(drainNow(ch))
+		sender, text, ok := findChatRelay(drainNow(ch))
 		if !ok {
-			t.Fatalf("slot %s: no ChatRelay pair", name)
+			t.Fatalf("slot %s: no relay Chat frame", name)
 		}
-		if ev.Actor != 1 {
-			t.Fatalf("slot %s: ChatRelay Actor=%d, want 1 (sender entity id)", name, ev.Actor)
-		}
-		if ev.Reason != chatScopeMatch {
-			t.Fatalf("slot %s: ChatRelay Reason=%d, want %d (match scope)", name, ev.Reason, chatScopeMatch)
+		if sender != 1 {
+			t.Fatalf("slot %s: relay sender=%d, want 1 (sender entity id)", name, sender)
 		}
 		if text != "hello world" {
 			t.Fatalf("slot %s: chat text=%q, want %q", name, text, "hello world")
@@ -166,15 +152,32 @@ func TestMatch_ChatTextTruncatedToMax(t *testing.T) {
 	}
 }
 
+func TestMatch_ChatRejectsNonUTF8(t *testing.T) {
+	m, _, outB := chatSetup(t)
+	m.handleChat(ctlChat{PlayerID: 1, Text: string([]byte{0xff, 0xfe})}) // invalid UTF-8
+	if n := countChatRelays(drainNow(outB)); n != 0 {
+		t.Fatalf("expected 0 relays for non-UTF-8 text, got %d", n)
+	}
+}
+
 func TestMatch_DecodeChatText(t *testing.T) {
+	// C→S Chat payload: [u8 len][text].
 	if _, ok := DecodeChatText(nil); ok {
 		t.Fatal("empty payload should fail")
 	}
 	if _, ok := DecodeChatText([]byte{3, 'h', 'i'}); ok {
 		t.Fatal("len mismatch should fail")
 	}
-	text, ok := DecodeChatText(encodeChatPayload("hey"))
+	text, ok := DecodeChatText([]byte{3, 'h', 'e', 'y'})
 	if !ok || text != "hey" {
-		t.Fatalf("round-trip failed: ok=%v text=%q", ok, text)
+		t.Fatalf("C→S round-trip failed: ok=%v text=%q", ok, text)
+	}
+	// S→C relay Chat payload: [u32 sender][u8 len][text].
+	sender, rtext, ok := DecodeRelayChat(encodeRelayChat(7, "gg"))
+	if !ok || sender != 7 || rtext != "gg" {
+		t.Fatalf("S→C round-trip failed: ok=%v sender=%d text=%q", ok, sender, rtext)
+	}
+	if _, _, ok := DecodeRelayChat([]byte{1, 2, 3}); ok {
+		t.Fatal("short relay payload should fail")
 	}
 }

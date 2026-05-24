@@ -6,14 +6,25 @@ package match
 // touches no wire schema (Chat 0x05 and Event/ChatRelay 0x0C already
 // exist), so schemaChecksum is unchanged.
 //
-// Wire (PHASE7.md §7.2 / open question §19.5): a chat message is relayed
-// as a pair — an Event{Kind: ChatRelay, Actor: senderEntityID, Reason: 1
-// (match scope)} immediately followed by the Chat (0x05) text frame — so
-// the client can attribute the message (Event carries no text; Chat
-// carries no sender). Dead-cam senders may chat (§3.9).
+// Wire (PHASE7.md §7.2 / open question §19.5 — RESOLVED, see
+// .phase-loop-notes "Spec issues"): the relay is a SINGLE self-attributing
+// Chat (0x05) frame. The two-frame {ChatRelay event + Chat text} pair the
+// spec sketched cannot be made atomic on the wire because the slot's out
+// channel has two producers (this actor + the reader's Pong echo), so a
+// Pong can split the pair and orphan the attribution (codex iter-5). A
+// single frame is atomic (one send, drop-or-deliver) and immune to
+// interleaving/backpressure.
+//
+//   C→S Chat payload: [u8 len][utf8 text]              (client → server)
+//   S→C Chat payload: [u32 sender][u8 len][utf8 text]  (server → client relay)
+//
+// schemaChecksum is unchanged (checksum.go descriptor untouched). Dead-cam
+// senders may chat (§3.9).
 
 import (
+	"encoding/binary"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/jafo/isnipes/internal/proto"
 	"github.com/jafo/isnipes/internal/sim"
@@ -26,8 +37,6 @@ const (
 	// 30 Hz sim tick, 0.5 s = 15 ticks (mirrors the lobby limit, P6 §6.2).
 	chatBurst       = 4
 	chatRefillTicks = 15
-	// chatScopeMatch is SPEC §541's scope=1 (match) for ChatRelay.
-	chatScopeMatch = 1
 )
 
 type chatBucket struct {
@@ -65,6 +74,11 @@ func (m *Match) handleChat(v ctlChat) {
 	if len(text) > chatMaxLen {
 		text = text[:chatMaxLen]
 	}
+	// Chat is specified as UTF-8 text; reject binary/garbage so the
+	// server never broadcasts invalid protocol text (codex iter-5).
+	if !utf8.ValidString(text) {
+		return
+	}
 	if !m.chatAllow(slot.PlayerID) {
 		return // rate-limited: silently dropped
 	}
@@ -94,53 +108,35 @@ func (m *Match) chatAllow(pid sim.EntityID) bool {
 	return true
 }
 
-// broadcastChat relays the ChatRelay event + Chat text frame to every
-// connected slot (incl. dead-cam). Best-effort per slot: a full out
-// queue drops the message for that slot only (does NOT close the slot,
-// unlike sendFrameTo).
+// broadcastChat relays a single self-attributing Chat frame to every
+// connected slot (incl. dead-cam). Best-effort, non-blocking per slot: a
+// full out queue drops the message for that slot only (never closes it,
+// unlike sendFrameTo). One frame ⇒ no orphan-attribution race.
 func (m *Match) broadcastChat(sender sim.EntityID, text string) {
-	ev := proto.Event{
-		Kind:   uint8(proto.EventChatRelay),
-		Actor:  uint32(sender),
-		Target: 0,
-		Reason: chatScopeMatch,
-	}
-	evPayload, err := ev.Encode(nil)
-	if err != nil {
-		m.abort("chat event encode: " + err.Error())
-		return
-	}
-	chatPayload := encodeChatPayload(text)
+	payload := encodeRelayChat(sender, text)
 	for _, s := range m.slots {
 		if s.out == nil {
 			continue
 		}
-		// The relay event and its text frame must arrive consecutively;
-		// only enqueue the text if the event made it into the queue.
 		select {
-		case s.out <- OutboundFrame{Type: proto.MsgEvent, Payload: evPayload}:
+		case s.out <- OutboundFrame{Type: proto.MsgChat, Payload: payload}:
 		default:
-			continue
-		}
-		select {
-		case s.out <- OutboundFrame{Type: proto.MsgChat, Payload: chatPayload}:
-		default:
+			// queue full: drop for this slot only.
 		}
 	}
 }
 
-// encodeChatPayload builds the Chat (0x05) payload: u8 len, utf8 text.
-// (proto.go has no Chat codec and is kept frozen; this is the only
-// caller, so the trivial encode lives here.)
-func encodeChatPayload(text string) []byte {
-	b := make([]byte, 1+len(text))
-	b[0] = byte(len(text))
-	copy(b[1:], text)
+// encodeRelayChat builds the S→C relay Chat payload: [u32 sender][u8 len][text].
+func encodeRelayChat(sender sim.EntityID, text string) []byte {
+	b := make([]byte, 4+1+len(text))
+	binary.LittleEndian.PutUint32(b[0:4], uint32(sender))
+	b[4] = byte(len(text))
+	copy(b[5:], text)
 	return b
 }
 
-// DecodeChatText extracts the text from a Chat (0x05) payload. Used by
-// the net read loop and tests.
+// DecodeChatText extracts the text from a C→S Chat payload: [u8 len][text].
+// Used by the net read loop (inbound client chat) and tests.
 func DecodeChatText(payload []byte) (string, bool) {
 	if len(payload) < 1 {
 		return "", false
@@ -150,4 +146,18 @@ func DecodeChatText(payload []byte) (string, bool) {
 		return "", false
 	}
 	return string(payload[1 : 1+n]), true
+}
+
+// DecodeRelayChat extracts (sender, text) from an S→C relay Chat payload:
+// [u32 sender][u8 len][text]. Used by tests (the TS client mirrors this).
+func DecodeRelayChat(payload []byte) (sim.EntityID, string, bool) {
+	if len(payload) < 5 {
+		return 0, "", false
+	}
+	sender := binary.LittleEndian.Uint32(payload[0:4])
+	n := int(payload[4])
+	if len(payload) != 5+n {
+		return 0, "", false
+	}
+	return sim.EntityID(sender), string(payload[5 : 5+n]), true
 }
