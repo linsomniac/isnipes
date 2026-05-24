@@ -8,6 +8,7 @@ import { App } from "./main.js";
 import type { LobbyWS, MatchStarted, RoomDescriptor } from "./lobby.js";
 import { computeSchemaChecksum } from "./proto.js";
 import { NetClient, type WebSocketLike } from "./netClient.js";
+import { resolveMatchSocketUrl } from "./settings.js";
 
 const NICK_KEY = "nick";
 const CLIENT_VERSION = "v0";
@@ -131,8 +132,16 @@ function text(s: string): Text {
 // ---- match-WS (best-effort; the view does not depend on it) ----
 
 function connectMatch(ms: MatchStarted, schemaChecksum: number, matchView: HTMLElement): void {
+  // Resolve the lobby-issued gameSocketPath against the lobby origin and
+  // reject an absolute / cross-origin path before sending the joinToken
+  // (§10.3 — a crafted matchStarted must not leak the token off-origin).
+  const url = resolveMatchSocketUrl(ms.gameSocketPath, wsBase());
+  if (url === null) {
+    matchView.setAttribute("data-match-error", "bad-socket-path");
+    return;
+  }
   try {
-    const ws = new WebSocket(wsBase() + ms.gameSocketPath);
+    const ws = new WebSocket(url);
     ws.binaryType = "arraybuffer";
     const nc = new NetClient(ws as unknown as WebSocketLike);
     nc.setEvents({

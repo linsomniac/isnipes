@@ -75,6 +75,20 @@ describe("input rebinding", () => {
     expect(c.setBindings({ ...PRESETS.classic, chatOpen: "KeyW" }).ok).toBe(false);
   });
 
+  test("rejects incomplete/corrupt bindings (missing or empty action key)", () => {
+    const c = new InputController(PRESETS.classic);
+    // missing turbo key.
+    const missing = { ...PRESETS.classic } as Record<string, string>;
+    delete missing.turbo;
+    expect(c.setBindings(missing as never).ok).toBe(false);
+    // empty-string key.
+    expect(c.setBindings({ ...PRESETS.classic, menu: "" }).ok).toBe(false);
+    // null key (corrupt persisted value).
+    expect(c.setBindings({ ...PRESETS.classic, moveN: null } as never).ok).toBe(false);
+    // prior map intact.
+    expect(c.getBindings().turbo).toBe("Space");
+  });
+
   test("a valid rebind applies", () => {
     const c = new InputController(PRESETS.classic);
     const ok = c.setBindings({ ...PRESETS.classic, turbo: "KeyQ" });

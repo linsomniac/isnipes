@@ -66,15 +66,24 @@ describe("combat overlays", () => {
     expect(ov.active(5)).toHaveLength(0);
   });
 
-  test("TestAnim_DeathPoofOnKill arms on the target (resolved via retention)", () => {
+  test("TestAnim_DeathPoofOnKill arms on a target still in the snapshot", () => {
     const reg = new EntityRegistry();
-    reg.update(snap(10, [ent(7, EntityKind.Player)]));
-    reg.update(snap(11, [])); // player 7 removed this tick
+    // killEntity sets FlagDead but the player stays in the death-tick
+    // snapshot, so the kill event's target resolves to Player.
+    reg.update(snap(11, [ent(7, EntityKind.Player)]));
     const ov = new OverlayManager();
     ov.onEvent(reg, EventKind.EntityKill, /*actor*/ 0, /*target*/ 7, /*tick*/ 11);
     const active = ov.active(11);
     expect(active).toHaveLength(1);
     expect(active[0]).toMatchObject({ kind: "poof", anchorId: 7 });
+  });
+
+  test("kill of an already-removed target arms no poof (no anchor)", () => {
+    const reg = new EntityRegistry();
+    reg.update(snap(12, [])); // target gone (eliminated/GC'd)
+    const ov = new OverlayManager();
+    ov.onEvent(reg, EventKind.EntityKill, 0, 7, 12);
+    expect(ov.active(12)).toHaveLength(0);
   });
 
   test("kill with unknown target arms no overlay (no anchor)", () => {

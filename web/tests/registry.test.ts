@@ -2,7 +2,7 @@
 // unknown-id fallback, retention of just-removed entities.
 
 import { describe, expect, test } from "vitest";
-import { EntityRegistry, EntityKind, RETENTION_TICKS } from "../src/registry.js";
+import { EntityRegistry, EntityKind } from "../src/registry.js";
 import type { Entity, Snapshot } from "../src/proto.js";
 
 function ent(id: number, kind: number, x = 0, y = 0, facing = 0): Entity {
@@ -35,17 +35,16 @@ describe("entity registry", () => {
     expect(reg.get(999)).toBeNull();
   });
 
-  test("TestRegistry_RebuildsEachSnapshot merges + retains then prunes", () => {
+  test("TestRegistry_RebuildsEachSnapshot replaces; off-AOI/removed → Unknown", () => {
     const reg = new EntityRegistry();
     reg.update(snap(10, [ent(1, EntityKind.Player), ent(7, EntityKind.Player)]));
-    // Player 7 killed: gone from the next snapshot, but the kill event
-    // referencing id 7 must still resolve within the retention window.
+    expect(reg.size()).toBe(2);
+    // §6.6: an entity absent from the next snapshot (off-AOI or removed)
+    // is immediately Unknown — no stale-kind retention (would mis-fire
+    // `scream` for off-AOI kills).
     reg.update(snap(11, [ent(1, EntityKind.Player)]));
-    expect(reg.kindOf(7)).toBe(EntityKind.Player); // still resolvable
-    expect(reg.kindOf(1)).toBe(EntityKind.Player);
-    // After retention elapses, id 7 is evicted.
-    reg.update(snap(11 + RETENTION_TICKS + 1, [ent(1, EntityKind.Player)]));
     expect(reg.kindOf(7)).toBe(EntityKind.Unknown);
+    expect(reg.kindOf(1)).toBe(EntityKind.Player);
     expect(reg.size()).toBe(1);
   });
 

@@ -104,9 +104,20 @@ export class WebAudioSink implements AudioSink {
     return this.ctx;
   }
 
+  // unlock resumes a suspended AudioContext. Call from a user-gesture
+  // handler (click/keydown) so cues are audible under browser autoplay
+  // policy (codex iter-3). Creates the context if absent.
+  unlock(): void {
+    const ctx = this.ensureCtx();
+    if (ctx && ctx.state === "suspended") void ctx.resume();
+  }
+
   play(cue: Cue, gain: number): void {
     const ctx = this.ensureCtx();
     if (!ctx) return;
+    // A server-driven cue may arrive before any gesture; best-effort
+    // resume so the cue isn't silently dropped once a gesture lands.
+    if (ctx.state === "suspended") void ctx.resume();
     const r = RECIPES[cue];
     const now = ctx.currentTime;
     const dur = r.durMs / 1000;

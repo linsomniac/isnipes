@@ -24,6 +24,9 @@ export interface InputIntent {
 
 const MOVE_ACTIONS: Action[] = ["moveN", "moveE", "moveS", "moveW"];
 const FIRE_ACTIONS: Action[] = ["fireN", "fireE", "fireS", "fireW"];
+export const ALL_ACTIONS: Action[] = [
+  ...MOVE_ACTIONS, ...FIRE_ACTIONS, "turbo", "chatOpen", "menu",
+];
 
 export const PRESETS: Record<Preset, Bindings> = {
   // SPEC §3.10.1: arrows move, WASD fire, Space turbo.
@@ -56,6 +59,12 @@ function combineDir(up: boolean, down: boolean, left: boolean, right: boolean): 
 // fire-key set must be disjoint, and turbo/chat/menu must not collide
 // with any move or fire key. Returns the colliding key, or null if ok.
 export function validateBindings(b: Bindings): string | null {
+  // Completeness: every action must map to a non-empty key string
+  // (codex iter-3: corrupt persisted bindings like {turbo:null} or
+  // {moveN:""} would silently disable an action).
+  for (const a of ALL_ACTIONS) {
+    if (typeof b[a] !== "string" || b[a] === "") return `missing:${a}`;
+  }
   const moveKeys = MOVE_ACTIONS.map((a) => b[a]);
   const fireKeys = FIRE_ACTIONS.map((a) => b[a]);
   const moveSet = new Set(moveKeys);

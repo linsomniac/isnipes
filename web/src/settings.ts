@@ -94,10 +94,29 @@ export function loadSettings(storage?: StorageLike): Settings {
     highContrast: parsed.highContrast === true,
     masterVolume: clamp01(parsed.masterVolume as number),
     nick: typeof parsed.nick === "string" ? parsed.nick.slice(0, 24) : "",
+    // Re-validate persisted servers: stored data is untrusted (could be
+    // hand-edited), so normalize each through the same URL guard before
+    // it re-enters Settings.servers (codex iter-3).
     servers: Array.isArray(parsed.servers)
-      ? parsed.servers.filter((s): s is string => typeof s === "string").slice(0, MAX_SERVERS)
+      ? dedupe(
+          parsed.servers
+            .filter((s): s is string => typeof s === "string")
+            .map((s) => normalizeServerUrl(s, pageProtocol()))
+            .filter((s): s is string => s !== null),
+        ).slice(0, MAX_SERVERS)
       : [],
   };
+}
+
+// pageProtocol reads the current page protocol, defaulting to https: so
+// stored ws:// entries are treated as mixed-content (rejected) unless the
+// page is actually http:.
+function pageProtocol(): string {
+  return (globalThis as { location?: { protocol?: string } }).location?.protocol ?? "https:";
+}
+
+function dedupe(xs: string[]): string[] {
+  return [...new Set(xs)];
 }
 
 export function saveSettings(s: Settings, storage?: StorageLike): void {
