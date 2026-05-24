@@ -241,8 +241,14 @@ func b2u8(b bool) uint8 {
 // readPhase5Replay parses the committed binary input stream. The layout
 // matches internal/sim/sim_test.go's writeReplayInputs.
 func readPhase5Replay(t *testing.T) [][]sim.PlayerInput {
+	return readReplayInputsAt(t, phase5ReplayPath())
+}
+
+// readReplayInputsAt parses any committed binary replay stream produced by
+// internal/sim/sim_test.go's writeReplayInputs.
+func readReplayInputsAt(t *testing.T, path string) [][]sim.PlayerInput {
 	t.Helper()
-	data, err := os.ReadFile(phase5ReplayPath())
+	data, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatalf("read replay inputs: %v", err)
 	}

@@ -371,6 +371,206 @@ func absInt(x int) int {
 	return x
 }
 
+// phase5LSSeed pins the LAST_STANDING fixture. It is a 4-player free-
+// for-all (Config.LevelLetter == 0 ⇒ defaultPvPLives = 3 lives each, no
+// snipes, no generators). Player 1 is a "hunter" that chases and kills
+// the other three (who hold their spawn positions) until each is
+// eliminated, leaving player 1 as the sole survivor — the natural
+// LAST_STANDING end the match-actor integration test asserts on.
+const phase5LSSeed uint32 = 0xDEADBEEF
+
+func phase5LSConfig() Config {
+	return Config{
+		Seed:      phase5LSSeed,
+		Width:     60,
+		Height:    40,
+		PlayerIDs: []EntityID{1, 2, 3, 4},
+		// LevelLetter == 0 ⇒ free-for-all: 3 lives, no snipes/generators.
+	}
+}
+
+// phase5LSMaxTicks caps the recorder. Driving three victims through
+// three deaths each (9 kills) needs a generous budget because the
+// respawn picker (§10.5) places each victim on the spawn tile *farthest*
+// from the lone hunter, so the hunter has to walk back across the map
+// after every kill.
+const phase5LSMaxTicks = 20000
+
+// TestDeterminism_Phase5_LastStanding records / replays the LAST_STANDING
+// fixture. Under -update it regenerates phase5_last_standing.{inputs,hash}
+// from the BFS-driven hunt; otherwise it replays the committed inputs and
+// asserts both the byte-for-byte fingerprint and the scenario invariant
+// (players 2, 3, 4 eliminated; player 1 survives). The match-actor side
+// (internal/match) replays the same .inputs to verify the natural
+// LAST_STANDING MatchOver.
+func TestDeterminism_Phase5_LastStanding(t *testing.T) {
+	s, err := NewSim(phase5LSConfig())
+	if err != nil {
+		t.Fatalf("NewSim: %v", err)
+	}
+	inputsPath := filepath.Join("testdata", "replays", "phase5_last_standing.inputs")
+	hashPath := filepath.Join("testdata", "replays", "phase5_last_standing.hash")
+
+	if *updateGolden {
+		inputs := generatePhase5LSInputs(t)
+		if err := writeReplayInputs(inputsPath, inputs); err != nil {
+			t.Fatalf("write inputs: %v", err)
+		}
+		for _, tick := range inputs {
+			if _, err := s.Tick(tick); err != nil {
+				t.Fatalf("tick err: %v", err)
+			}
+		}
+		fp := s.Fingerprint()
+		if err := os.WriteFile(hashPath, []byte(hex.EncodeToString(fp[:])+"\n"), 0o644); err != nil {
+			t.Fatalf("write hash: %v", err)
+		}
+		t.Logf("recorded %d ticks; eliminated 2=%v 3=%v 4=%v survivor1=%v",
+			len(inputs), s.Eliminated(2), s.Eliminated(3), s.Eliminated(4), !s.Eliminated(1))
+		return
+	}
+
+	inputs, err := readReplayInputs(inputsPath)
+	if err != nil {
+		t.Fatalf("read inputs: %v (run with -update)", err)
+	}
+	for i, tick := range inputs {
+		if _, err := s.Tick(tick); err != nil {
+			t.Fatalf("tick %d: %v", i, err)
+		}
+	}
+	wantHex, err := os.ReadFile(hashPath)
+	if err != nil {
+		t.Fatalf("read hash: %v", err)
+	}
+	want := string(wantHex)
+	if len(want) > 0 && want[len(want)-1] == '\n' {
+		want = want[:len(want)-1]
+	}
+	fp := s.Fingerprint()
+	if got := hex.EncodeToString(fp[:]); want != got {
+		t.Fatalf("fingerprint: want %s, got %s", want, got)
+	}
+	// Scenario invariant: the hunt leaves exactly one survivor.
+	for _, id := range []EntityID{2, 3, 4} {
+		if !s.Eliminated(id) {
+			t.Errorf("victim %d not eliminated; lives=%d", id, s.LivesRemaining(id))
+		}
+	}
+	if s.Eliminated(1) {
+		t.Error("hunter (player 1) was eliminated; fixture no longer yields a LAST_STANDING survivor")
+	}
+}
+
+// generatePhase5LSInputs records the hunter-vs-three-idle-victims
+// playthrough and returns the input stream truncated a few ticks past
+// the third elimination. Victims emit no input (a player absent from a
+// tick's input set holds position — sim.go step 3), so only the hunter's
+// per-tick input is recorded, keeping the fixture compact. Only invoked
+// under -update.
+func generatePhase5LSInputs(t *testing.T) [][]PlayerInput {
+	t.Helper()
+	s, err := NewSim(phase5LSConfig())
+	if err != nil {
+		t.Fatalf("NewSim: %v", err)
+	}
+	out := make([][]PlayerInput, 0, 6000)
+	trailing := 0
+	for i := 0; i < phase5LSMaxTicks; i++ {
+		in := phase5LSTickInputs(s, i)
+		out = append(out, in)
+		if _, err := s.Tick(in); err != nil {
+			t.Fatalf("record tick %d: %v", i, err)
+		}
+		if s.Eliminated(2) && s.Eliminated(3) && s.Eliminated(4) {
+			// A few trailing ticks so the replay reaches the same terminal
+			// state cleanly (and the match-actor end-eval has a tick to fire).
+			trailing++
+			if trailing >= 3 {
+				break
+			}
+		}
+	}
+	if !(s.Eliminated(2) && s.Eliminated(3) && s.Eliminated(4)) {
+		t.Fatalf("recorder did not eliminate all three victims within %d ticks", phase5LSMaxTicks)
+	}
+	return out
+}
+
+// phase5LSTickInputs computes one tick of the hunt: player 1 BFS-paths to
+// the nearest living victim (center-then-turn steering) and fires point-
+// blank once orthogonally adjacent. Deterministic — reads only entity
+// positions and the immutable maze, with a fixed victim-ID order for
+// tie-breaking.
+func phase5LSTickInputs(s *Sim, i int) []PlayerInput {
+	pos := make(map[EntityID]Entity, 4)
+	for _, e := range s.Entities() {
+		if e.Kind == KindPlayer && e.Flags&FlagDead == 0 {
+			pos[e.ID] = e
+		}
+	}
+	hunter, alive := pos[1]
+	if !alive {
+		return nil
+	}
+	hx, hy := int(hunter.X)/subtilePerTile, int(hunter.Y)/subtilePerTile
+	var target Entity
+	bestDist := 1 << 30
+	haveTarget := false
+	for _, id := range []EntityID{2, 3, 4} {
+		v, ok := pos[id]
+		if !ok {
+			continue
+		}
+		vx, vy := int(v.X)/subtilePerTile, int(v.Y)/subtilePerTile
+		if d := absInt(hx-vx) + absInt(hy-vy); d < bestDist {
+			bestDist, target, haveTarget = d, v, true
+		}
+	}
+	if !haveTarget {
+		return []PlayerInput{{PlayerID: 1, ClientTick: uint16(i)}}
+	}
+	tx, ty := int(target.X)/subtilePerTile, int(target.Y)/subtilePerTile
+	var dir, fire Dir
+	if bestDist <= 1 {
+		// Orthogonally adjacent. A straight 8-dir shot only intersects the
+		// target's AABB (half-extent 96) if the shooter is aligned on the
+		// perpendicular axis, so slide onto the target's cross-axis first,
+		// then fire down the shared row/column.
+		const fireAlign = 80 // < half-extent 96 ⇒ projectile line crosses the AABB
+		dx := int(target.X) - int(hunter.X)
+		dy := int(target.Y) - int(hunter.Y)
+		if hy == ty { // share a row → fire E/W, align Y
+			switch {
+			case dy > fireAlign:
+				dir = DirS
+			case dy < -fireAlign:
+				dir = DirN
+			case dx > 0:
+				fire = DirE
+			default:
+				fire = DirW
+			}
+		} else { // share a column → fire N/S, align X
+			switch {
+			case dx > fireAlign:
+				dir = DirE
+			case dx < -fireAlign:
+				dir = DirW
+			case dy > 0:
+				fire = DirS
+			default:
+				fire = DirN
+			}
+		}
+	} else {
+		if nx, ny, ok := PathNext(s.maze, hx, hy, tx, ty, 4096); ok {
+			dir = steerAlongPath(hunter.X, hunter.Y, hx, hy, nx, ny)
+		}
+	}
+	return []PlayerInput{{PlayerID: 1, Dir: dir, FireDir: fire, ClientTick: uint16(i)}}
+}
+
 // TestDeterminism_SnipeAI satisfies DoD #6: two sims with identical
 // Config (incl. LevelLetter/Number) and identical inputs evolve to
 // identical fingerprints at every tick.
