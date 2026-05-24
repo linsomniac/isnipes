@@ -5,9 +5,12 @@
   "type": "module",
   "scripts": {
     "test": "vitest run",
-    "build": "echo 'phase 2 placeholder; full vite build comes later'"
+    "build": "esbuild src/browser.ts --bundle --format=esm --target=es2022 --outfile=dist/app.js && cp index.html dist/index.html",
+    "test:e2e": "npm run build && playwright test"
   },
   "devDependencies": {
+    "@playwright/test": "^1.49.0",
+    "esbuild": "^0.24.0",
     "vitest": "^2.1.0",
     "typescript": "^5.4.0"
   }

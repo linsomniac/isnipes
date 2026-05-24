@@ -7,6 +7,8 @@
 //	--motd           Message of the day shown in lobby welcome
 //	--log-level      slog level (debug|info|warn|error)
 //	--enable-pprof   Mount /debug/pprof/*
+//	--web-dist       Serve the client from this directory instead of the
+//	                 embedded build (used by the Playwright e2e harness)
 package main
 
 import (
@@ -40,6 +42,7 @@ func main() {
 		logLevel    = flag.String("log-level", "info", "log level: debug|info|warn|error")
 		enablePprof = flag.Bool("enable-pprof", false, "mount /debug/pprof/*")
 		showVersion = flag.Bool("version", false, "print version and exit")
+		webDist     = flag.String("web-dist", "", "serve the client from this directory instead of the embedded build")
 	)
 	flag.Parse()
 
@@ -50,10 +53,16 @@ func main() {
 
 	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{Level: parseLogLevel(*logLevel)})))
 
-	staticFS, err := fs.Sub(embeddedFS, "dist")
-	if err != nil {
-		slog.Error("embed fs", "err", err)
-		os.Exit(1)
+	var staticFS fs.FS
+	if *webDist != "" {
+		staticFS = os.DirFS(*webDist)
+	} else {
+		sub, err := fs.Sub(embeddedFS, "dist")
+		if err != nil {
+			slog.Error("embed fs", "err", err)
+			os.Exit(1)
+		}
+		staticFS = sub
 	}
 
 	registry := match.NewRegistry(match.RegistryConfig{MaxConcurrentMatches: *maxMatches})

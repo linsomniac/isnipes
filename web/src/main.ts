@@ -1,7 +1,7 @@
 // PHASE6.md §5.3 — top-level state machine. Handles boot,
 // deep-link auto-join, and the LOBBY ↔ IN_MATCH transitions.
 
-import { LobbyClient, type LobbyWS, parseDeepLinkRoom } from "./lobby.js";
+import { LobbyClient, type LobbyWS, parseDeepLinkRoom, type Welcome } from "./lobby.js";
 
 export type AppState = "LOBBY" | "IN_MATCH" | "POST_MATCH";
 
@@ -23,6 +23,10 @@ export class App {
   state: AppState = "LOBBY";
   lobby: LobbyClient;
 
+  // UI hook fired on welcome (after any deep-link auto-join is queued).
+  // The browser view layer sets this; headless callers may leave it null.
+  onWelcome: ((w: Welcome) => void) | null = null;
+
   constructor(deps: AppDeps) {
     this.deps = deps;
     this.lobby = new LobbyClient();
@@ -35,11 +39,13 @@ export class App {
     const nick = this.deps.getStoredNick();
     const deepLinkRoom = parseDeepLinkRoom(this.deps.locationSearch());
     this.lobby.attach(ws, nick, this.deps.clientVersion, this.deps.schemaChecksum);
-    if (deepLinkRoom !== null) {
-      this.lobby.onWelcome = () => {
-        // Auto-join immediately on welcome.
+    this.lobby.onWelcome = (w) => {
+      if (deepLinkRoom !== null) {
+        // Auto-join immediately on welcome, before the UI hook runs so
+        // the join frame is in flight as the lobby view appears.
         this.lobby.joinRoom(deepLinkRoom);
-      };
-    }
+      }
+      this.onWelcome?.(w);
+    };
   }
 }
