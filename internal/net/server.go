@@ -305,14 +305,20 @@ func (s *Server) handleMatch(w http.ResponseWriter, r *http.Request) {
 			// maxObservedRTTMs (PHASE4.md §7 / match/owt.go).
 			rttMs := now - p.TsOrigin
 			m.SubmitPong(pid, rttMs)
+		case proto.MsgChat:
+			// Phase 7 §7: in-match chat. Decode the {u8 len, text}
+			// payload and hand to the match actor for relay. A malformed
+			// payload is dropped (not fatal — chat is best-effort).
+			if text, ok := match.DecodeChatText(payload); ok {
+				m.SubmitChat(pid, text)
+			}
 		case proto.MsgMatchJoin:
 			// MatchJoin after first frame is malformed.
 			_ = closeWith(c, CloseMalformed)
 			m.SubmitDC(pid)
 			return
 		default:
-			// Ignore unknown types (e.g. Chat) — Phase 2 doesn't
-			// implement them but mustn't crash.
+			// Ignore unknown types — mustn't crash.
 		}
 	}
 }

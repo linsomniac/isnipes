@@ -187,6 +187,9 @@ type Match struct {
 	// frames. Read at tick() time to stamp PlayerInput.LagComp.
 	owt map[sim.EntityID]*OWTEstimator
 
+	// Phase 7 §7: per-player in-match chat rate-limit buckets.
+	chatBuckets map[sim.EntityID]*chatBucket
+
 	// emitted match-started flag (per §6.4 "once").
 	matchStartedEmitted bool
 
@@ -258,6 +261,7 @@ func NewMatch(cfg MatchConfig) (*Match, error) {
 		ticker:        cfg.Ticker,
 		pendingInputs: make(map[sim.EntityID]proto.Input),
 		owt:           make(map[sim.EntityID]*OWTEstimator),
+		chatBuckets:   make(map[sim.EntityID]*chatBucket),
 		dcTokens:      make(map[string]sim.EntityID),
 		lastScores:    newScoreSnapshot(),
 		done:          make(chan struct{}),
@@ -497,6 +501,8 @@ func (m *Match) handleControl(msg controlMsg) {
 		// fresh-join admission). If the token was already consumed,
 		// the delete is a no-op.
 		delete(m.bySession, v.Token)
+	case ctlChat:
+		m.handleChat(v)
 	}
 }
 
