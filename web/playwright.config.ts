@@ -11,7 +11,6 @@ const PORT = 8123;
 export default defineConfig({
   testDir: "./tests/e2e",
   timeout: 30_000,
-  expect: { timeout: 10_000 },
   fullyParallel: false,
   retries: 0,
   reporter: [["list"]],
@@ -19,10 +18,19 @@ export default defineConfig({
     baseURL: `http://127.0.0.1:${PORT}`,
     trace: "off",
   },
+  // Golden screenshots (§12) need reproducible pixels: pin the viewport and
+  // deviceScaleFactor=1 so DPI/AA differences don't blow the 2% tolerance.
+  snapshotPathTemplate: "{testDir}/{testFilePath}-snapshots/{arg}{ext}",
+  expect: { timeout: 10_000, toHaveScreenshot: { maxDiffPixelRatio: 0.02 } },
   projects: [
     {
       name: "chromium",
-      use: { ...devices["Desktop Chrome"], channel: "chrome" },
+      use: {
+        ...devices["Desktop Chrome"],
+        channel: "chrome",
+        viewport: { width: 1280, height: 720 },
+        deviceScaleFactor: 1,
+      },
     },
   ],
   webServer: {

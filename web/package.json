@@ -5,11 +5,13 @@
   "type": "module",
   "scripts": {
     "test": "vitest run",
+    "test:coverage": "vitest run --coverage",
     "build": "esbuild src/browser.ts --bundle --format=esm --target=es2022 --outfile=dist/app.js && cp index.html dist/index.html",
     "test:e2e": "npm run build && playwright test"
   },
   "devDependencies": {
     "@playwright/test": "^1.49.0",
+    "@vitest/coverage-v8": "^2.1.0",
     "esbuild": "^0.24.0",
     "vitest": "^2.1.0",
     "typescript": "^5.4.0"

@@ -2,7 +2,7 @@
 // master-volume gating, using a fake sink (no audio hardware).
 
 import { describe, expect, test } from "vitest";
-import { AudioEngine, type AudioSink, type Cue } from "../src/audio.js";
+import { AudioEngine, WebAudioSink, type AudioSink, type Cue } from "../src/audio.js";
 import { EntityRegistry, EntityKind } from "../src/registry.js";
 import { EventKind } from "../src/proto.js";
 import type { Entity, Snapshot } from "../src/proto.js";
@@ -104,5 +104,70 @@ describe("audio volume gating", () => {
     const hi = setup(5);
     hi.eng.onEvent(EventKind.EntityHit, 1, 2, 0);
     expect(hi.sink.calls[0].gain).toBe(1);
+  });
+});
+
+// ---- WebAudioSink (procedural synth) with a fake AudioContext ----
+
+class FakeParam {
+  setValueAtTime(): void {}
+  exponentialRampToValueAtTime(): void {}
+}
+class FakeNode {
+  type = "";
+  frequency = new FakeParam();
+  gain = new FakeParam();
+  buffer: unknown = null;
+  connect(): void {}
+  start(): void {}
+  stop(): void {}
+}
+class FakeAudioContext {
+  currentTime = 0;
+  sampleRate = 48000;
+  destination = {};
+  state: "running" | "suspended" = "suspended";
+  resumed = 0;
+  resume(): void { this.resumed++; this.state = "running"; }
+  createGain(): FakeNode { return new FakeNode(); }
+  createOscillator(): FakeNode { return new FakeNode(); }
+  createBufferSource(): FakeNode { return new FakeNode(); }
+  createBuffer(_ch: number, len: number): { getChannelData: () => Float32Array } {
+    return { getChannelData: () => new Float32Array(len) };
+  }
+}
+
+describe("WebAudioSink", () => {
+  test("synthesises oscillator + noise cues and unlocks", () => {
+    const g = globalThis as unknown as { AudioContext?: unknown };
+    const prev = g.AudioContext;
+    let ctx: FakeAudioContext | null = null;
+    g.AudioContext = class extends FakeAudioContext {
+      constructor() { super(); ctx = this; }
+    } as unknown as typeof AudioContext;
+    try {
+      const sink = new WebAudioSink();
+      sink.play("shoot", 0.5); // oscillator path
+      sink.play("generator", 0.8); // noise-buffer path
+      sink.unlock();
+      expect(ctx).not.toBeNull();
+      // play() resumes a suspended ctx and unlock() resumes again.
+      expect(ctx!.resumed).toBeGreaterThanOrEqual(1);
+    } finally {
+      g.AudioContext = prev;
+    }
+  });
+
+  test("is a no-op when WebAudio is unavailable", () => {
+    const g = globalThis as unknown as { AudioContext?: unknown };
+    const prev = g.AudioContext;
+    delete g.AudioContext;
+    try {
+      const sink = new WebAudioSink();
+      expect(() => sink.play("hit", 1)).not.toThrow();
+      expect(() => sink.unlock()).not.toThrow();
+    } finally {
+      g.AudioContext = prev;
+    }
   });
 });

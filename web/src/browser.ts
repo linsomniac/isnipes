@@ -414,6 +414,11 @@ class MatchRunner {
       this.hud,
     );
     if (self) drawMinimap(this.ui, this.maze, self, others);
+    // Test-gated self-position hook so the live e2e (#27) can assert
+    // server-authoritative movement. Prod never sets __ISNIPES_TEST__.
+    if (self && testMode()) {
+      (window as unknown as { __isnipesSelf?: { x: number; y: number } }).__isnipesSelf = { x: self.x, y: self.y };
+    }
     // self HUD stats from the self entity + the scoreboard row.
     if (selfEntity) this.hud.hp = selfEntity.hp;
     const row = this.hud.rows.find((r) => r.id === latest.yourEntityID);
