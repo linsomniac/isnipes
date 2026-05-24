@@ -629,11 +629,17 @@ func (m *Match) startOrAbort() {
 	// Deterministic ID order for the sim.
 	sortIDs(pids)
 	cfg := sim.Config{
-		Seed:        m.cfg.MapSeed,
-		Width:       m.cfg.MapWidth,
-		Height:      m.cfg.MapHeight,
-		PlayerIDs:   pids,
-		NoRespawn:   true,
+		Seed:      m.cfg.MapSeed,
+		Width:     m.cfg.MapWidth,
+		Height:    m.cfg.MapHeight,
+		PlayerIDs: pids,
+		// Phase 5 §6: live matches respawn players until their lives are
+		// exhausted (default 3 for PvP, level-table value for PvE). The
+		// Phase 2 placeholder hardcoded NoRespawn:true, which left the
+		// whole lives/respawn/dead-cam lifecycle inert. A match ends when a
+		// player exhausts all lives (LAST_STANDING / ALL_ELIMINATED), the
+		// PvE objective is cleared, or the 10-minute TIMER fires.
+		NoRespawn:   false,
 		LevelLetter: m.cfg.LevelLetter,
 		LevelNumber: m.cfg.LevelNumber,
 	}
