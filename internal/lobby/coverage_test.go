@@ -1,0 +1,237 @@
+package lobby
+
+import (
+	"testing"
+	"time"
+
+	"github.com/jafo/isnipes/internal/proto"
+)
+
+// expectError posts an envelope and asserts the next error frame carries
+// the wanted code.
+func expectError(t *testing.T, l *Lobby, sid SessionID, out chan Outbound, tag string, payload any, wantCode string) {
+	t.Helper()
+	sendEnvelope(t, l, sid, tag, payload)
+	o, ok := drainUntil(t, out, proto.LobbyTagError, 500*time.Millisecond)
+	if !ok {
+		t.Fatalf("%s: no error frame", tag)
+	}
+	e, ok := o.Payload.(proto.LobbyError)
+	if !ok {
+		t.Fatalf("%s: error payload type %T", tag, o.Payload)
+	}
+	if e.Code != wantCode {
+		t.Fatalf("%s: error code = %q, want %q", tag, e.Code, wantCode)
+	}
+}
+
+// TestLobby_JoinRoomRejections exercises every guard in handleJoinRoom.
+func TestLobby_JoinRoomRejections(t *testing.T) {
+	t.Run("hello first", func(t *testing.T) {
+		l, _, done, _ := newTestLobby(t)
+		defer func() { l.Stop(); <-done }()
+		s, out := connect(t, l)
+		expectError(t, l, s.ID, out, proto.LobbyJoinRoom,
+			proto.JoinRoom{RoomID: "x"}, proto.LobbyErrBadRequest)
+	})
+
+	t.Run("already in a room", func(t *testing.T) {
+		l, _, done, _ := newTestLobby(t)
+		defer func() { l.Stop(); <-done }()
+		a, outA := connect(t, l)
+		helloAndDrain(t, l, a, outA, "Alice")
+		sendEnvelope(t, l, a.ID, proto.LobbyCreateRoom, proto.CreateRoom{
+			Name: "R", Max: 4, Level: proto.Level{Letter: "A", Number: 1},
+		})
+		drainRoomListWithCount(t, outA, 1, 500*time.Millisecond)
+		expectError(t, l, a.ID, outA, proto.LobbyJoinRoom,
+			proto.JoinRoom{RoomID: "anything"}, proto.LobbyErrAlreadyInRoom)
+	})
+
+	t.Run("no such room", func(t *testing.T) {
+		l, _, done, _ := newTestLobby(t)
+		defer func() { l.Stop(); <-done }()
+		a, outA := connect(t, l)
+		helloAndDrain(t, l, a, outA, "Alice")
+		expectError(t, l, a.ID, outA, proto.LobbyJoinRoom,
+			proto.JoinRoom{RoomID: "ghost"}, proto.LobbyErrRoomGone)
+	})
+
+	t.Run("room full", func(t *testing.T) {
+		l, _, done, _ := newTestLobby(t)
+		defer func() { l.Stop(); <-done }()
+		a, outA := connect(t, l)
+		helloAndDrain(t, l, a, outA, "Alice")
+		b, outB := connect(t, l)
+		helloAndDrain(t, l, b, outB, "Bob")
+		c, outC := connect(t, l)
+		helloAndDrain(t, l, c, outC, "Carol")
+		// Max=2 → host A + B fills it; C is rejected.
+		sendEnvelope(t, l, a.ID, proto.LobbyCreateRoom, proto.CreateRoom{
+			Name: "R", Max: 2, Level: proto.Level{Letter: "A", Number: 1},
+		})
+		rl, _ := drainRoomListWithCount(t, outA, 1, 500*time.Millisecond)
+		rid := rl.Rooms[0].ID
+		sendEnvelope(t, l, b.ID, proto.LobbyJoinRoom, proto.JoinRoom{RoomID: rid})
+		drainUntil(t, outB, proto.LobbyRoomList, 500*time.Millisecond)
+		expectError(t, l, c.ID, outC, proto.LobbyJoinRoom,
+			proto.JoinRoom{RoomID: rid}, proto.LobbyErrRoomFull)
+	})
+
+	t.Run("room not accepting joins", func(t *testing.T) {
+		l, _, done, _ := newTestLobby(t)
+		defer func() { l.Stop(); <-done }()
+		a, outA := connect(t, l)
+		helloAndDrain(t, l, a, outA, "Alice")
+		b, outB := connect(t, l)
+		helloAndDrain(t, l, b, outB, "Bob")
+		c, outC := connect(t, l)
+		helloAndDrain(t, l, c, outC, "Carol")
+		rid := createAndJoinRoom(t, l, a, b, outA, outB)
+		// Host starts → room transitions to STARTING; a late joiner is
+		// refused with ROOM_GONE ("not accepting joins").
+		sendEnvelope(t, l, a.ID, proto.LobbyStartMatch, proto.StartMatch{RoomID: rid})
+		drainUntil(t, outA, proto.LobbyMatchStarted, 500*time.Millisecond)
+		expectError(t, l, c.ID, outC, proto.LobbyJoinRoom,
+			proto.JoinRoom{RoomID: rid}, proto.LobbyErrRoomGone)
+	})
+}
+
+// TestLobby_LeaveRoomNotInRoom covers handleLeaveRoom's no-room guard.
+func TestLobby_LeaveRoomNotInRoom(t *testing.T) {
+	l, _, done, _ := newTestLobby(t)
+	defer func() { l.Stop(); <-done }()
+	a, outA := connect(t, l)
+	helloAndDrain(t, l, a, outA, "Alice")
+	expectError(t, l, a.ID, outA, proto.LobbyLeaveRoom,
+		proto.LeaveRoom{}, proto.LobbyErrNoRoom)
+}
+
+// TestLobby_StartMatchRejections exercises handleStartMatch's guards.
+func TestLobby_StartMatchRejections(t *testing.T) {
+	t.Run("not in a room", func(t *testing.T) {
+		l, _, done, _ := newTestLobby(t)
+		defer func() { l.Stop(); <-done }()
+		a, outA := connect(t, l)
+		helloAndDrain(t, l, a, outA, "Alice")
+		expectError(t, l, a.ID, outA, proto.LobbyStartMatch,
+			proto.StartMatch{RoomID: "x"}, proto.LobbyErrNoRoom)
+	})
+
+	t.Run("not host", func(t *testing.T) {
+		l, _, done, _ := newTestLobby(t)
+		defer func() { l.Stop(); <-done }()
+		a, outA := connect(t, l)
+		helloAndDrain(t, l, a, outA, "Alice")
+		b, outB := connect(t, l)
+		helloAndDrain(t, l, b, outB, "Bob")
+		rid := createAndJoinRoom(t, l, a, b, outA, outB)
+		expectError(t, l, b.ID, outB, proto.LobbyStartMatch,
+			proto.StartMatch{RoomID: rid}, proto.LobbyErrNotHost)
+	})
+
+	t.Run("too few players", func(t *testing.T) {
+		l, _, done, _ := newTestLobby(t)
+		defer func() { l.Stop(); <-done }()
+		a, outA := connect(t, l)
+		helloAndDrain(t, l, a, outA, "Alice")
+		sendEnvelope(t, l, a.ID, proto.LobbyCreateRoom, proto.CreateRoom{
+			Name: "R", Max: 4, Level: proto.Level{Letter: "A", Number: 1},
+		})
+		rl, _ := drainRoomListWithCount(t, outA, 1, 500*time.Millisecond)
+		rid := rl.Rooms[0].ID
+		expectError(t, l, a.ID, outA, proto.LobbyStartMatch,
+			proto.StartMatch{RoomID: rid}, proto.LobbyErrBadRequest)
+	})
+}
+
+// TestLobby_MatchEndedClosesRoom drives the ctlMatchEnded control path:
+// once a started match reports its end, handleMatchEnded closes the room,
+// removes it from the listing, and clears each member's roomID.
+func TestLobby_MatchEndedClosesRoom(t *testing.T) {
+	l, _, done, _ := newTestLobby(t)
+	defer func() { l.Stop(); <-done }()
+	a, outA := connect(t, l)
+	helloAndDrain(t, l, a, outA, "Alice")
+	b, outB := connect(t, l)
+	helloAndDrain(t, l, b, outB, "Bob")
+	rid := createAndJoinRoom(t, l, a, b, outA, outB)
+	sendEnvelope(t, l, a.ID, proto.LobbyStartMatch, proto.StartMatch{RoomID: rid})
+	ms, ok := drainUntil(t, outA, proto.LobbyMatchStarted, 500*time.Millisecond)
+	if !ok {
+		t.Fatal("no matchStarted")
+	}
+	matchID := ms.Payload.(proto.MatchStarted).MatchID
+
+	// Deliver the match-ended control message through the actor.
+	l.in <- ctlMatchEnded{MatchID: matchID}
+
+	if _, exists := snapshotRooms(t, l)[rid]; exists {
+		t.Fatalf("room %s still listed after match ended", rid)
+	}
+	// The members' roomID is cleared: A can no longer leave the (gone) room.
+	expectError(t, l, a.ID, outA, proto.LobbyLeaveRoom,
+		proto.LeaveRoom{}, proto.LobbyErrNoRoom)
+}
+
+// TestLobby_DisconnectDuringMatchKeepsRoom: a member dropping their lobby
+// WS while the room is STARTING leaves the room intact — the match
+// lifecycle owns teardown (handleDisconnect's non-open branch).
+func TestLobby_DisconnectDuringMatchKeepsRoom(t *testing.T) {
+	l, _, done, _ := newTestLobby(t)
+	defer func() { l.Stop(); <-done }()
+	a, outA := connect(t, l)
+	helloAndDrain(t, l, a, outA, "Alice")
+	b, outB := connect(t, l)
+	helloAndDrain(t, l, b, outB, "Bob")
+	rid := createAndJoinRoom(t, l, a, b, outA, outB)
+	sendEnvelope(t, l, a.ID, proto.LobbyStartMatch, proto.StartMatch{RoomID: rid})
+	drainUntil(t, outA, proto.LobbyMatchStarted, 500*time.Millisecond)
+
+	// Host drops their lobby connection mid-match.
+	l.Disconnect(a.ID)
+	// Unknown-session disconnect is a no-op (covers the early return).
+	l.Disconnect(SessionID("does-not-exist"))
+
+	if _, exists := snapshotRooms(t, l)[rid]; !exists {
+		t.Fatalf("room %s GC'd on mid-match disconnect; expected it to persist", rid)
+	}
+}
+
+// TestLobby_ConnectAfterStop: Connect on a stopped lobby returns nil and
+// closes the provided out channel.
+func TestLobby_ConnectAfterStop(t *testing.T) {
+	l, _, done, _ := newTestLobby(t)
+	l.Stop()
+	<-done
+	out := make(chan Outbound, 1)
+	if s := l.Connect(out); s != nil {
+		t.Fatalf("Connect after Stop = %v, want nil", s)
+	}
+	if _, ok := <-out; ok {
+		t.Fatal("out channel not closed after Connect-on-stopped")
+	}
+}
+
+// TestLobby_SendDropsOnFullQueue: when a session's outbound queue is full,
+// send drops the session (closes closed + out). A 1-slot queue overflows on
+// the second frame of the hello reply (welcome, then roomList).
+func TestLobby_SendDropsOnFullQueue(t *testing.T) {
+	l, _, done, _ := newTestLobby(t)
+	defer func() { l.Stop(); <-done }()
+	out := make(chan Outbound, 1)
+	s := l.Connect(out)
+	if s == nil {
+		t.Fatal("Connect returned nil")
+	}
+	// We never drain `out`; the hello reply is welcome + roomList = 2 sends,
+	// so the second send finds the queue full and drops the session.
+	sendEnvelope(t, l, s.ID, proto.LobbyHello, proto.Hello{
+		Nick: "Alice", SchemaChecksum: proto.SchemaChecksum(),
+	})
+	select {
+	case <-s.closed:
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("session was not dropped on full queue")
+	}
+}
