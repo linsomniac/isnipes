@@ -116,9 +116,11 @@ type MatchConfig struct {
 	// callers leave this zero.
 	DCGraceTicksOverride uint32
 
-	// Phase 8 §6.4/§6.5 observability hooks. All nil-safe: a Match with
-	// none set behaves exactly as before. Populated by the Registry from
-	// RegistryConfig.
+	// Phase 8 §6.4/§6.5 observability hooks. All nil-safe (an unset hook is
+	// simply not called). NOTE the SPEC §11 over-budget snapshot suppression
+	// is ALWAYS active regardless of these hooks — they only surface metrics
+	// about behaviour that now happens either way. Populated by the Registry
+	// from RegistryConfig.
 	TickSampler      TickObserver // Observe(tickDuration)
 	OnTickOverBudget func()       // tick exceeded the 33ms budget
 	OnSnapshotDrop   func()       // a snapshot was suppressed to catch up
@@ -205,6 +207,13 @@ type Match struct {
 	onTickOverBudget func()
 	onSnapshotDrop   func()
 	overBudget       bool
+
+	// gracefulShutdown is set (actor-goroutine only) by shutdown() so the
+	// Run defer skips the post-exit absorber — a graceful StopAll leaves no
+	// tail goroutine, which the leak check (DoD #5) relies on. Safe because
+	// StopAll's precondition is that producers (listeners/clients) are
+	// already stopped, so there are no late ctlJoin/ctlReconnect to absorb.
+	gracefulShutdown bool
 
 	// per-player input buffer: latest input received since previous tick.
 	pendingInputs map[sim.EntityID]proto.Input
@@ -465,8 +474,13 @@ func (m *Match) Run() {
 		m.ticker.Stop()
 		// Spawn a tail absorber so any control message that arrives
 		// after Run returns (race window per codex P5/iter6 #2) gets
-		// an ErrAuth reply instead of blocking the sender forever.
-		go m.absorbAfterExit()
+		// an ErrAuth reply instead of blocking the sender forever. On a
+		// graceful shutdown (StopAll) producers are already stopped and we
+		// want full goroutine quiescence (DoD #5), so skip the absorber —
+		// shutdown() already drained the inbox.
+		if !m.gracefulShutdown {
+			go m.absorbAfterExit()
+		}
 		close(m.done)
 	}()
 
@@ -971,15 +985,6 @@ func (m *Match) recordTick(d time.Duration) {
 	}
 }
 
-// SubmitShutdown asks the actor to end the match cleanly. Safe to call once
-// the actor has already exited (it selects on done). PHASE8 §7.2.
-func (m *Match) SubmitShutdown() {
-	select {
-	case m.in <- ctlShutdown{}:
-	case <-m.done:
-	}
-}
-
 // shutdown ends the match gracefully: no SERVER_ERROR MatchOver (so the
 // load harness does not count it as a MatchAbort) — clients simply get a
 // clean WS close. Used for process shutdown and deterministic test
@@ -988,6 +993,7 @@ func (m *Match) shutdown() {
 	if m.state() == StateEnded {
 		return
 	}
+	m.gracefulShutdown = true
 	m.setState(StateEnded)
 	m.endedAt = m.clock()
 	for _, slot := range m.slots {

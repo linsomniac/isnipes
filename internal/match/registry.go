@@ -10,6 +10,11 @@ import (
 // ErrTooManyMatches is surfaced when Create would exceed the cap.
 var ErrTooManyMatches = errors.New("match: too many concurrent matches")
 
+// ErrRegistryClosed is returned by Create after StopAll has begun, so a
+// match cannot be created into a registry that is shutting down (which would
+// otherwise make StopAll wait until its context deadline).
+var ErrRegistryClosed = errors.New("match: registry is shutting down")
+
 // RegistryConfig governs concurrency and lifecycle.
 type RegistryConfig struct {
 	MaxConcurrentMatches int // default 64 (§5.3 of SPEC)
@@ -24,9 +29,10 @@ type RegistryConfig struct {
 // Registry is the lookup table of live matches. It is safe for
 // concurrent use by lobby + net layers.
 type Registry struct {
-	cfg     RegistryConfig
-	mu      sync.RWMutex
-	matches map[string]*Match
+	cfg      RegistryConfig
+	mu       sync.RWMutex
+	matches  map[string]*Match
+	stopping bool // set by StopAll; Create is rejected once true
 }
 
 // NewRegistry constructs a Registry. nil config gets defaults.
@@ -42,6 +48,9 @@ func NewRegistry(cfg RegistryConfig) *Registry {
 func (r *Registry) Create(mc MatchConfig) (*Match, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	if r.stopping {
+		return nil, ErrRegistryClosed
+	}
 	if len(r.matches) >= r.cfg.MaxConcurrentMatches {
 		return nil, ErrTooManyMatches
 	}
@@ -93,15 +102,27 @@ func (r *Registry) Len() int {
 // after a deterministic drain (Registry.Close alone does not stop matches).
 // PHASE8 §7.2.
 func (r *Registry) StopAll(ctx context.Context) error {
-	r.mu.RLock()
+	// Mark stopping under the lock and snapshot the live matches in one
+	// critical section so a concurrent Create either lost the race (and is
+	// included) or is rejected with ErrRegistryClosed — StopAll can never
+	// be outrun by new matches.
+	r.mu.Lock()
+	r.stopping = true
 	matches := make([]*Match, 0, len(r.matches))
 	for _, m := range r.matches {
 		matches = append(matches, m)
 	}
-	r.mu.RUnlock()
+	r.mu.Unlock()
 
+	// Submit shutdown context-awarely: a stalled/full inbox must not block
+	// past the deadline.
 	for _, m := range matches {
-		m.SubmitShutdown()
+		select {
+		case m.in <- ctlShutdown{}:
+		case <-m.done:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
 	}
 
 	// Wait for each Run goroutine to exit, then for RemoveEnded to drain

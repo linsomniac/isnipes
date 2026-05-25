@@ -3,6 +3,7 @@ package match
 import (
 	"context"
 	"fmt"
+	"runtime"
 	"testing"
 	"time"
 
@@ -164,9 +165,13 @@ func TestMatch_OverBudgetSkipsNextSnapshot(t *testing.T) {
 	}
 }
 
-// TestRegistry_StopAll — StopAll ends every live match cleanly and drains
-// the registry deterministically (no lingering match actor). (DoD #5 support)
+// TestRegistry_StopAll — StopAll ends every live match cleanly, drains the
+// registry deterministically, and (crucially for the DoD #5 leak check)
+// leaves NO tail goroutine per match. (DoD #5 support)
 func TestRegistry_StopAll(t *testing.T) {
+	runtime.GC()
+	before := runtime.NumGoroutine()
+
 	reg := NewRegistry(RegistryConfig{MaxConcurrentMatches: 16})
 	const n = 4
 	for i := 0; i < n; i++ {
@@ -190,8 +195,43 @@ func TestRegistry_StopAll(t *testing.T) {
 	if reg.Len() != 0 {
 		t.Fatalf("after StopAll Len=%d want 0", reg.Len())
 	}
-	// Idempotent: a second StopAll on an empty registry is a no-op.
+
+	// Goroutine quiescence: no per-match absorber should linger. Allow a
+	// brief settle for the Run goroutines' final scheduling.
+	var after int
+	for i := 0; i < 100; i++ {
+		runtime.GC()
+		after = runtime.NumGoroutine()
+		if after <= before+1 {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if after > before+1 {
+		t.Fatalf("goroutine leak after StopAll: before=%d after=%d (want ~before; "+
+			"a tail absorber per match would show n=%d extra)", before, after, n)
+	}
+
+	// Idempotent: a second StopAll on a stopped registry is a no-op.
 	if err := reg.StopAll(ctx); err != nil {
 		t.Fatalf("second StopAll: %v", err)
+	}
+}
+
+// TestRegistry_CreateRejectedAfterStopAll — once StopAll has begun, Create
+// is rejected so shutdown can never be outrun by a new match. (codex P3)
+func TestRegistry_CreateRejectedAfterStopAll(t *testing.T) {
+	reg := NewRegistry(RegistryConfig{MaxConcurrentMatches: 16})
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := reg.StopAll(ctx); err != nil {
+		t.Fatalf("StopAll: %v", err)
+	}
+	_, err := reg.Create(MatchConfig{
+		MatchID:     "after-stop",
+		PlayerSlots: []PendingJoin{{PlayerID: sim.EntityID(1), Token: "t"}},
+	})
+	if err != ErrRegistryClosed {
+		t.Fatalf("Create after StopAll: err=%v want ErrRegistryClosed", err)
 	}
 }
