@@ -1,6 +1,7 @@
 package lobby
 
 import (
+	"context"
 	"testing"
 	"time"
 
@@ -18,7 +19,16 @@ import (
 // than merely some non-zero fallback.
 func TestLobby_StartMatchPropagatesRoomLevel(t *testing.T) {
 	l, _, done, reg := newTestLobby(t)
-	defer func() { l.Stop(); <-done }()
+	defer func() {
+		// This test starts a real match actor (+ticker); l.Stop() alone
+		// leaves it running. Registry.StopAll ends live matches cleanly so
+		// the goroutine does not outlive the test.
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		_ = reg.StopAll(ctx)
+		l.Stop()
+		<-done
+	}()
 
 	a, outA := connect(t, l)
 	helloAndDrain(t, l, a, outA, "Alice")
