@@ -10,7 +10,10 @@ build:
 test:
 	go test -count=1 ./...
 
-test-race:
+# The CI race gate also enforces the frozen-file guard (DoD #2) so a
+# frozen-schema/sim edit fails the standard CI command, not just an
+# operator who remembers `make check-frozen`.
+test-race: check-frozen
 	go test -race -count=1 ./...
 
 # Phase 5: tests that depend on internal/sim test-only mutators

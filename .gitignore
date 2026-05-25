@@ -9,3 +9,5 @@ coverage.out
 /web/test-results/
 /web/playwright-report/
 /web/coverage/
+/node_modules/
+/.claude/

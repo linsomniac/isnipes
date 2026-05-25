@@ -10,9 +10,8 @@ import {
   encodeFrame, type Snapshot, type Entity,
 } from "./proto.js";
 import { NetClient, type WebSocketLike } from "./netClient.js";
-import { resolveMatchSocketUrl } from "./settings.js";
 import {
-  loadSettings, saveSettings, addServer, type Settings,
+  resolveMatchSocketUrl, normalizeServerUrl, loadSettings, saveSettings, addServer, type Settings,
 } from "./settings.js";
 import { selectPalette } from "./palette.js";
 import { mazeViewFromMapInit } from "./maze.js";
@@ -167,9 +166,39 @@ function text(s: string): Text {
   return document.createTextNode(s);
 }
 
+const SERVER_KEY = "isnipes.server";
+
+// chosenLobbyOrigin returns the selected server origin (validated and
+// present in the saved list) or the page origin (§10.3). This is the
+// origin the lobby WS connects to AND the base gameSocketPath resolves
+// against.
+function chosenLobbyOrigin(settings: Settings): string {
+  let sel = "";
+  try { sel = localStorage.getItem(SERVER_KEY) ?? ""; } catch { sel = ""; }
+  if (sel && settings.servers.includes(sel)) {
+    const norm = normalizeServerUrl(sel, location.protocol);
+    if (norm) return norm;
+  }
+  return wsBase();
+}
+
 function renderServerList(ui: UI, settings: Settings): void {
   ui.serverList.innerHTML = "";
-  for (const s of settings.servers) ui.serverList.append(el("li", { "data-testid": "server-row" }, s));
+  const current = chosenLobbyOrigin(settings);
+  // The page origin is always an implicit option.
+  for (const s of [wsBase(), ...settings.servers]) {
+    const selected = s === current;
+    const row = el("li", { "data-testid": "server-row", "data-origin": s }, "");
+    const btn = el("button", { "data-testid": "server-select" }, (selected ? "● " : "○ ") + s) as HTMLButtonElement;
+    btn.onclick = () => {
+      try { localStorage.setItem(SERVER_KEY, s); } catch { /* ignore */ }
+      // Reconnecting mid-session is out of scope; reload to bind the new
+      // lobby origin cleanly.
+      location.reload();
+    };
+    row.append(btn);
+    ui.serverList.append(row);
+  }
 }
 
 function renderRooms(listEl: HTMLElement, rooms: RoomDescriptor[]): void {
@@ -265,10 +294,13 @@ class MatchRunner {
   private clientTick = 0;
   private raf = 0;
   private onEnd: () => void;
+  private lobbyOrigin: string;
+  private chatKeyHandler: ((e: KeyboardEvent) => void) | null = null;
 
-  constructor(ui: UI, settings: Settings, onEnd: () => void) {
+  constructor(ui: UI, settings: Settings, lobbyOrigin: string, onEnd: () => void) {
     this.ui = ui;
     this.onEnd = onEnd;
+    this.lobbyOrigin = lobbyOrigin;
     const ctx = ui.canvas.getContext("2d") as unknown as import("./render.js").RenderCtx;
     this.renderer = new Renderer(ctx, selectPalette(settings.colorBlind, settings.highContrast));
     this.audio = new AudioEngine(new WebAudioSink(), this.reg, () => settings.masterVolume);
@@ -276,7 +308,9 @@ class MatchRunner {
   }
 
   connect(ms: MatchStarted, schemaChecksum: number): void {
-    const url = resolveMatchSocketUrl(ms.gameSocketPath, wsBase());
+    // §10.3: resolve gameSocketPath against the SELECTED lobby origin
+    // (not a hardcoded page origin) before sending the joinToken.
+    const url = resolveMatchSocketUrl(ms.gameSocketPath, this.lobbyOrigin);
     if (url === null) { this.ui.matchView.setAttribute("data-match-error", "bad-socket-path"); return; }
     const ws = new WebSocket(url);
     ws.binaryType = "arraybuffer";
@@ -323,7 +357,7 @@ class MatchRunner {
           const dv = new DataView(payload.buffer, payload.byteOffset, payload.byteLength);
           const id = dv.getUint32(0, true);
           const n = payload[4];
-          if (payload.length >= 5 + n) {
+          if (payload.length === 5 + n) {
             const txt = new TextDecoder().decode(payload.subarray(5, 5 + n));
             const line: ChatLine = { fromId: id, fromNick: this.hud.nickById.get(id) ?? `Player ${id}`, text: txt };
             this.hud.chat = appendChat(this.hud.chat, line);
@@ -379,22 +413,28 @@ class MatchRunner {
     this.raf = requestAnimationFrame(loop);
     // Input send + chat input keys at ~30 Hz.
     this.inputTimer = window.setInterval(() => this.tickInput(), 33);
-    this.ui.chatInput.addEventListener("keydown", (e) => {
+    // Stored so stop() can detach it — otherwise a stale runner's handler
+    // would consume Enter against a closed socket in the next match.
+    this.chatKeyHandler = (e: KeyboardEvent) => {
       if (e.code === "Enter") { this.sendChat(this.ui.chatInput.value); this.ui.chatInput.value = ""; this.ui.chatInput.hidden = true; this.ui.chatInput.blur(); }
       else if (e.code === "Escape") { this.ui.chatInput.value = ""; this.ui.chatInput.hidden = true; this.ui.chatInput.blur(); }
-    });
+    };
+    this.ui.chatInput.addEventListener("keydown", this.chatKeyHandler);
   }
 
   private tickInput(): void {
-    if (!this.nc) return;
+    // Only send once the socket is open (send() throws in CONNECTING).
+    if (!this.nc || !this.ws || this.ws.readyState !== WebSocket.OPEN) return;
     const intent = this.input.intent();
     this.nc.sendInput({ clientTick: this.clientTick++, dir: intent.dir, turbo: intent.turbo ? 1 : 0, fireDir: intent.fireDir });
   }
 
   private sendChat(textVal: string): void {
     const trimmed = textVal.trim();
-    if (trimmed === "" || !this.ws) return;
-    const enc = new TextEncoder().encode(trimmed.slice(0, 255));
+    if (trimmed === "" || !this.ws || this.ws.readyState !== WebSocket.OPEN) return;
+    // Encode first, then trim to ≤255 bytes on a UTF-8 boundary so a
+    // multi-byte char can't wrap the u8 length and get rejected.
+    const enc = truncateUtf8(new TextEncoder().encode(trimmed), 255);
     const payload = new Uint8Array(1 + enc.length);
     payload[0] = enc.length;
     payload.set(enc, 1);
@@ -431,8 +471,18 @@ class MatchRunner {
     clearInterval(this.inputTimer);
     window.removeEventListener("keydown", this.keydown);
     window.removeEventListener("keyup", this.keyup);
+    if (this.chatKeyHandler) { this.ui.chatInput.removeEventListener("keydown", this.chatKeyHandler); this.chatKeyHandler = null; }
     try { this.nc?.close(); } catch { /* ignore */ }
   }
+}
+
+// truncateUtf8 returns the longest prefix of `bytes` ≤ max that does not
+// split a multi-byte UTF-8 sequence (continuation bytes are 0x80–0xBF).
+function truncateUtf8(bytes: Uint8Array, max: number): Uint8Array {
+  if (bytes.length <= max) return bytes;
+  let end = max;
+  while (end > 0 && (bytes[end] & 0xc0) === 0x80) end--;
+  return bytes.subarray(0, end);
 }
 
 // ---- scene harness (test-gated; §12.2) ----
@@ -493,8 +543,9 @@ async function boot(): Promise<void> {
     if (scene && isSceneName(scene)) { renderScene(ui, scene, settings); return; }
   }
 
+  const lobbyOrigin = chosenLobbyOrigin(settings);
   const app = new App({
-    openLobbyWS: () => new BrowserLobbyWS(wsBase() + "/ws/lobby"),
+    openLobbyWS: () => new BrowserLobbyWS(lobbyOrigin + "/ws/lobby"),
     locationSearch: () => location.search,
     getStoredNick: () => settings.nick || defaultNick(settings),
     schemaChecksum,
@@ -538,7 +589,7 @@ async function boot(): Promise<void> {
   };
   app.onMatchStarted = (ms: MatchStarted) => {
     ui.lobby.hidden = true; ui.match.hidden = false; ui.endDialog.hidden = true;
-    runner = new MatchRunner(ui, settings, () => app.endMatch());
+    runner = new MatchRunner(ui, settings, lobbyOrigin, () => app.endMatch());
     runner.connect(ms, schemaChecksum);
   };
   app.lobby.onError = (e) => { ui.status.textContent = `error: ${e.code} ${e.message}`; };
