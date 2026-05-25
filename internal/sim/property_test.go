@@ -66,6 +66,52 @@ func TestPropertyNoEntityInsideWall(t *testing.T) {
 	}
 }
 
+// TestPropertySnipesNeverInsideWall covers the snipe path the generic
+// property test misses (it runs level-less, so no snipes spawn). With the
+// enlarged snipeHalfExt (MAZE_REVAMP.md), weak-block separation must never
+// push a snipe into a wall near a closed cell link (codex review). Level 9 →
+// max snipe cap → dense clustering around generators, the worst case.
+func TestPropertySnipesNeverInsideWall(t *testing.T) {
+	for i := uint32(1); i <= 6; i++ {
+		seed := i * 0x9E3779B1
+		cfg := Config{
+			Seed:        seed,
+			Width:       120,
+			Height:      80,
+			PlayerIDs:   []EntityID{1},
+			LevelLetter: 'C',
+			LevelNumber: 9,
+		}
+		s, err := NewSim(cfg)
+		if err != nil {
+			t.Fatalf("seed %#x: %v", seed, err)
+		}
+		for tick := 0; tick < 1200; tick++ {
+			if _, err := s.Tick(nil); err != nil {
+				t.Fatalf("seed %#x tick %d: %v", seed, tick, err)
+			}
+			for _, e := range s.Entities() {
+				if e.Kind != KindSnipe || e.Flags&FlagDead != 0 {
+					continue
+				}
+				he := entityHalfExt(e.Kind)
+				tileMinX := int((e.X - he) / subtilePerTile)
+				tileMaxX := int((e.X + he - 1) / subtilePerTile)
+				tileMinY := int((e.Y - he) / subtilePerTile)
+				tileMaxY := int((e.Y + he - 1) / subtilePerTile)
+				for ty := tileMinY; ty <= tileMaxY; ty++ {
+					for tx := tileMinX; tx <= tileMaxX; tx++ {
+						if s.Tile(tx, ty) == TileWall {
+							t.Fatalf("seed %#x tick %d: snipe %d pos=(%d,%d) AABB tile (%d,%d) is wall",
+								seed, tick, e.ID, e.X, e.Y, tx, ty)
+						}
+					}
+				}
+			}
+		}
+	}
+}
+
 func TestPropertyProjectileNeverPassesThroughWall(t *testing.T) {
 	for i := uint32(1); i <= 10; i++ {
 		seed := i * 0x9E3779B1

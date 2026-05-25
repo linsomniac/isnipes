@@ -187,23 +187,47 @@ func (s *Sim) applySnipeWeakBlock() {
 			if absdy < 0 {
 				absdy = -absdy
 			}
+			// Displace the higher-ID snipe off the dominant axis, but only if
+			// the resulting AABB stays clear of walls — otherwise the enlarged
+			// (MAZE_REVAMP.md) snipe could be shoved into a wall near a closed
+			// cell link, violating the no-entity-inside-wall invariant. Weak
+			// separation is cosmetic, so skipping a blocked push (snipes stay
+			// briefly overlapped) is harmless.
 			if absdx >= absdy {
+				var nx int32
 				if dx > 0 {
-					eHi.X = eLo.X + 2*snipeHalfExt + 1
+					nx = eLo.X + 2*snipeHalfExt + 1
 				} else {
-					eHi.X = eLo.X - 2*snipeHalfExt - 1
+					nx = eLo.X - 2*snipeHalfExt - 1
 				}
-				eHi.VX = 0
+				if !s.aabbHitsWall(nx, eHi.Y, snipeHalfExt) {
+					eHi.X = nx
+					eHi.VX = 0
+				}
 			} else {
+				var ny int32
 				if dy > 0 {
-					eHi.Y = eLo.Y + 2*snipeHalfExt + 1
+					ny = eLo.Y + 2*snipeHalfExt + 1
 				} else {
-					eHi.Y = eLo.Y - 2*snipeHalfExt - 1
+					ny = eLo.Y - 2*snipeHalfExt - 1
 				}
-				eHi.VY = 0
+				if !s.aabbHitsWall(eHi.X, ny, snipeHalfExt) {
+					eHi.Y = ny
+					eHi.VY = 0
+				}
 			}
 		}
 	}
+}
+
+// aabbHitsWall reports whether an axis-aligned box centred at (cx, cy) with
+// half-extent he overlaps any WALL tile. It checks the four corners, which
+// covers the ≤2×2 tile span of an entity with he ≤ subtilePerTile (snipes).
+func (s *Sim) aabbHitsWall(cx, cy, he int32) bool {
+	return s.maze.at(int((cx-he)/subtilePerTile), int((cy-he)/subtilePerTile)) == TileWall ||
+		s.maze.at(int((cx+he-1)/subtilePerTile), int((cy-he)/subtilePerTile)) == TileWall ||
+		s.maze.at(int((cx-he)/subtilePerTile), int((cy+he-1)/subtilePerTile)) == TileWall ||
+		s.maze.at(int((cx+he-1)/subtilePerTile), int((cy+he-1)/subtilePerTile)) == TileWall
 }
 
 // stepGeneratorsEmission is the per-tick generator emission pass; the
