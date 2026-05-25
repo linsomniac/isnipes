@@ -26,6 +26,16 @@ func (s *clientStats) addOut(n int)               { s.bytesOut.Add(uint64(n)) }
 func (s *clientStats) addError()                  { s.errors.Add(1) }
 func (s *clientStats) addLatency(d time.Duration) { s.lat.Observe(d) }
 
+// latencyWindowTicks bounds the per-client sendAt map. Each input tick
+// records a send timestamp; without eviction the map grows for the whole run
+// (a soak-killing leak in the harness itself). The server echoes an input via
+// snapshot YourLastInputTick within a few ticks, so a window far larger than
+// any acceptable echo latency (256 ticks ≈ 8.5s at 30Hz) keeps every real
+// measurement while capping the map. ct is uint16, so ct-window wraps cleanly.
+// AIDEV-NOTE: do NOT remove this bound — see git history; the soak RSS gate is
+// meaningless if the harness leaks faster than the server it measures.
+const latencyWindowTicks uint16 = 256
+
 // walkDir returns a deterministic non-zero movement direction (1..8) keyed
 // off the input tick so bots actually move (exercising movement, collision,
 // AOI and snapshot diffs) without ever firing — firing would kill players in
@@ -123,6 +133,7 @@ func runClient(ctx context.Context, wsURL, token string, inputHz int, stats *cli
 			}
 			mu.Lock()
 			sendAt[ct] = time.Now()
+			delete(sendAt, ct-latencyWindowTicks) // evict the entry one window back; bounds the map
 			mu.Unlock()
 			if err := writeFrame(ctx, c, frame); err != nil {
 				// ctx cancellation at end-of-run is expected, not an error.

@@ -51,6 +51,8 @@ type Report struct {
 	GoroutineGrowth         int // soak: last steady sample − first (trend; 0 otherwise)
 	RSSStartBytes           uint64
 	RSSEndBytes             uint64
+	RSSSteadyStartBytes     uint64 // first post-warmup soak sample (0 if not a soak / too short)
+	RSSSteadyEndBytes       uint64 // last soak sample
 	ClientErrors            int
 	MatchAborts             int
 }
@@ -68,6 +70,16 @@ func (r Report) RSSGrewMoreThan(frac float64) bool {
 	return float64(r.RSSEndBytes) > float64(r.RSSStartBytes)*(1+frac)
 }
 
+// RSSSteadyGrowthFrac is the fractional RSS change across the post-warmup soak
+// window — the leak signal. Zero when the run was too short to sample past the
+// warmup, in which case the trend is indeterminate (not "no growth").
+func (r Report) RSSSteadyGrowthFrac() float64 {
+	if r.RSSSteadyStartBytes == 0 {
+		return 0
+	}
+	return float64(r.RSSSteadyEndBytes)/float64(r.RSSSteadyStartBytes) - 1
+}
+
 // String renders a fixed-width human-readable table.
 func (r Report) String() string {
 	var b strings.Builder
@@ -78,15 +90,12 @@ func (r Report) String() string {
 		r.TickP50.Round(time.Microsecond), r.TickP99.Round(time.Microsecond), r.TicksOverBudget, r.SnapshotDrops)
 	fmt.Fprintf(&b, "  bandwidth/client in=%.2f KB/s out=%.2f KB/s\n", r.BytesInPerClientPerSec, r.BytesOutPerClientPerSec)
 	fmt.Fprintf(&b, "  goroutines before=%d after=%d\n", r.GoroutinesBefore, r.GoroutinesAfter)
-	fmt.Fprintf(&b, "  rss start=%dKiB end=%dKiB (%.1f%%)\n",
-		r.RSSStartBytes/1024, r.RSSEndBytes/1024, 100*(float64(r.RSSEndBytes)/float64(maxU64(r.RSSStartBytes, 1))-1))
+	fmt.Fprintf(&b, "  rss idle=%dKiB peak≈%dKiB (working set vs bare process; not a leak signal)\n",
+		r.RSSStartBytes/1024, r.RSSEndBytes/1024)
+	if r.RSSSteadyStartBytes != 0 {
+		fmt.Fprintf(&b, "  rss steady-trend %dKiB -> %dKiB (%.1f%%)\n",
+			r.RSSSteadyStartBytes/1024, r.RSSSteadyEndBytes/1024, 100*r.RSSSteadyGrowthFrac())
+	}
 	fmt.Fprintf(&b, "  client-errors=%d match-aborts=%d\n", r.ClientErrors, r.MatchAborts)
 	return b.String()
-}
-
-func maxU64(a, b uint64) uint64 {
-	if a > b {
-		return a
-	}
-	return b
 }

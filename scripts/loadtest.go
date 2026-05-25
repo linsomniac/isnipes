@@ -22,6 +22,12 @@ import (
 	"github.com/jafo/isnipes/internal/loadtest"
 )
 
+// soakRSSTolerance is the max steady-state RSS growth (post-warmup first sample
+// to last) a soak may show before it is treated as a leak. Generous enough to
+// absorb GC heap-goal stepping and working-set jitter; an actual unbounded leak
+// over a long soak blows past it by orders of magnitude.
+const soakRSSTolerance = 0.25
+
 func main() {
 	var (
 		matches        = flag.Int("matches", 4, "number of concurrent matches (M)")
@@ -117,8 +123,16 @@ func main() {
 			fmt.Printf("REGRESSION: goroutines %d -> %d after drain\n", rep.GoroutinesBefore, rep.GoroutinesAfter)
 			exit = 1
 		}
-		if rep.RSSGrewMoreThan(0.05) {
-			fmt.Printf("REGRESSION: RSS grew >5%% (%dKiB -> %dKiB)\n", rep.RSSStartBytes/1024, rep.RSSEndBytes/1024)
+		// RSS leak gate: the post-warmup steady-state trend, NOT the
+		// bare-process→under-load diff (which always trips, since 512 players
+		// legitimately use far more than an idle process). A healthy server
+		// plateaus after warmup; an unbounded leak climbs well past tolerance.
+		switch {
+		case rep.RSSSteadyStartBytes == 0:
+			fmt.Println("WARN: soak too short to assess the RSS trend (need samples past the 2m warmup)")
+		case rep.RSSSteadyGrowthFrac() > soakRSSTolerance:
+			fmt.Printf("REGRESSION: RSS trended up %.1f%% in steady state (%dKiB -> %dKiB)\n",
+				100*rep.RSSSteadyGrowthFrac(), rep.RSSSteadyStartBytes/1024, rep.RSSSteadyEndBytes/1024)
 			exit = 1
 		}
 	}

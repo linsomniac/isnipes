@@ -18,6 +18,11 @@ import (
 	"github.com/jafo/isnipes/internal/sim"
 )
 
+// soakWarmupDuration is the leading slice of a soak run excluded from the RSS
+// leak trend, giving the working set (512 connections, sims, snapshot buffers)
+// time to reach steady state before we start watching for unbounded growth.
+const soakWarmupDuration = 2 * time.Minute
+
 // fanOut sends each tick observation to every observer (the exact
 // RecordingSampler for the gate AND the registry histogram for /metrics).
 type fanOut []match.TickObserver
@@ -129,6 +134,7 @@ func runLoad(cfg Config, reg *observ.Registry) (Report, error) {
 	// post-drain figures below.)
 	goroutineMax := before
 	var goroutineSamples []int // sampler-goroutine only; read after join (no race)
+	var rssSamples []uint64    // ditto; drives the steady-state RSS leak trend
 	sampleStop := make(chan struct{})
 	var sampleDone sync.WaitGroup
 	if cfg.Soak {
@@ -144,12 +150,14 @@ func runLoad(cfg Config, reg *observ.Registry) (Report, error) {
 					return
 				case <-t.C:
 					g := runtime.NumGoroutine()
+					rss := rssBytes()
 					goroutineSamples = append(goroutineSamples, g)
+					rssSamples = append(rssSamples, rss)
 					if g > goroutineMax {
 						goroutineMax = g
 					}
 					fmt.Printf("soak t=%-6s goroutines=%d rss=%dKiB\n",
-						time.Since(start).Round(time.Second), g, rssBytes()/1024)
+						time.Since(start).Round(time.Second), g, rss/1024)
 				}
 			}
 		}()
@@ -177,6 +185,21 @@ func runLoad(cfg Config, reg *observ.Registry) (Report, error) {
 	goroutineGrowth := 0
 	if n := len(goroutineSamples); n >= 2 {
 		goroutineGrowth = goroutineSamples[n-1] - goroutineSamples[0]
+	}
+
+	// RSS steady-state trend: skip a warmup window (the working set ramps as
+	// the connections, sims and snapshot buffers populate), then take the first
+	// post-warmup sample vs the last. A healthy server plateaus; a real leak
+	// keeps climbing. This is the leak signal — NOT rssStart→rssEnd, which
+	// compares the bare pre-load process to a fully-loaded one and so always
+	// shows a huge, meaningless increase.
+	var rssSteadyStart, rssSteadyEnd uint64
+	if cfg.RotateEvery > 0 {
+		warmup := int(soakWarmupDuration / cfg.RotateEvery)
+		if len(rssSamples)-warmup >= 2 {
+			rssSteadyStart = rssSamples[warmup]
+			rssSteadyEnd = rssSamples[len(rssSamples)-1]
+		}
 	}
 
 	teardown()
@@ -219,6 +242,8 @@ func runLoad(cfg Config, reg *observ.Registry) (Report, error) {
 		GoroutineGrowth:         goroutineGrowth,
 		RSSStartBytes:           rssStart,
 		RSSEndBytes:             rssEnd,
+		RSSSteadyStartBytes:     rssSteadyStart,
+		RSSSteadyEndBytes:       rssSteadyEnd,
 		ClientErrors:            int(stats.errors.Load()),
 		MatchAborts:             int(stats.matchAborts.Load()),
 	}, nil
