@@ -20,7 +20,13 @@ jobs:
         if: >-
           github.event_name == 'pull_request' &&
           !contains(github.event.pull_request.labels.*.name, 'frozen-change-approved')
-        run: bash scripts/check-frozen-paths.sh "origin/${{ github.base_ref }}"
+        # Run the BASE-branch copy of the gate, not the PR's — otherwise a PR
+        # could weaken the script and then change frozen files. The base copy
+        # also includes the guard scripts/manifest in its pattern, so editing
+        # them in the PR trips the (base) gate too.
+        run: |
+          git show "origin/${{ github.base_ref }}:scripts/check-frozen-paths.sh" > /tmp/frozen-gate.sh
+          bash /tmp/frozen-gate.sh "origin/${{ github.base_ref }}"
 
       - uses: actions/setup-go@v5
         with:
@@ -37,7 +43,9 @@ jobs:
       - run: npm -C web ci
       - name: Client unit tests + coverage
         run: npm -C web run test:coverage
-      - name: Client e2e (Playwright, Chromium)
+      - name: Install Playwright browser (channel chrome)
+        run: npx -C web playwright install --with-deps chrome
+      - name: Client e2e (Playwright, Chrome)
         run: npm -C web run test:e2e
 
       - name: Embed build + embed-tag default-asset test

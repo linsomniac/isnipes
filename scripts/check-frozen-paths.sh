@@ -14,7 +14,10 @@ cd "$(dirname "$0")/.."
 
 BASE="${1:-origin/main}"
 
-PATTERN='^(internal/sim/|internal/proto/|web/src/(proto|sim|prediction|interp|netClient)\.ts$|scripts/check-frozen\.sh$|scripts/frozen\.sha256$)'
+# Includes the guard scripts + manifest THEMSELVES so they cannot be edited
+# to weaken the gate without tripping it (and CI runs the base-branch copy of
+# this script — see ci.yml — so a PR cannot tamper with the running gate).
+PATTERN='^(internal/sim/|internal/proto/|web/src/(proto|sim|prediction|interp|netClient)\.ts$|scripts/check-frozen(-paths)?\.sh$|scripts/frozen\.sha256$)'
 
 changed="$(git diff --name-only "$BASE"...HEAD | grep -E "$PATTERN" || true)"
 if [[ -n "$changed" ]]; then

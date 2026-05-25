@@ -67,7 +67,13 @@ func main() {
 		exit = 1
 	}
 
+	// Never record a baseline from a dirty run — it would establish a
+	// reference from an invalid measurement.
 	if *updateBaseline {
+		if !clean {
+			fmt.Println("refusing to write baseline from a non-clean run")
+			os.Exit(1)
+		}
 		if err := loadtest.SaveBaseline(*baselinePath, loadtest.BaselineFromReport(rep)); err != nil {
 			fmt.Println("baseline write error:", err)
 			os.Exit(1)
@@ -82,13 +88,16 @@ func main() {
 			fmt.Println("baseline read error:", err)
 			os.Exit(1)
 		}
-		if !exists {
+		switch {
+		case !exists && clean:
 			if err := loadtest.SaveBaseline(*baselinePath, loadtest.BaselineFromReport(rep)); err != nil {
 				fmt.Println("baseline seed error:", err)
 				os.Exit(1)
 			}
 			fmt.Println("seeded baseline", *baselinePath, "(first run)")
-		} else {
+		case !exists:
+			fmt.Println("no baseline and run was not clean — not seeding")
+		default:
 			for _, r := range loadtest.CheckRegression(rep, base, 0.20, 8.0) {
 				fmt.Println("REGRESSION:", r)
 				exit = 1
@@ -97,8 +106,15 @@ func main() {
 	}
 
 	if *soak {
+		// Trend during the run catches goroutines that accumulate while
+		// active and are freed on cancellation (the post-drain check alone
+		// would miss that).
+		if rep.GoroutineGrowth > 2 {
+			fmt.Printf("REGRESSION: goroutines trended up during soak (+%d; peak %d)\n", rep.GoroutineGrowth, rep.GoroutineMax)
+			exit = 1
+		}
 		if rep.GoroutineLeaked(2) {
-			fmt.Printf("REGRESSION: goroutines %d -> %d (peak %d)\n", rep.GoroutinesBefore, rep.GoroutinesAfter, rep.GoroutineMax)
+			fmt.Printf("REGRESSION: goroutines %d -> %d after drain\n", rep.GoroutinesBefore, rep.GoroutinesAfter)
 			exit = 1
 		}
 		if rep.RSSGrewMoreThan(0.05) {

@@ -1,6 +1,7 @@
 package loadtest
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -39,6 +40,9 @@ func LoadBaseline(path string) (Baseline, bool, error) {
 	}
 	if err != nil {
 		return Baseline{}, false, err
+	}
+	if len(bytes.TrimSpace(data)) == 0 {
+		return Baseline{}, false, nil // empty file ⇒ treat as absent (seed it)
 	}
 	var b Baseline
 	if err := json.Unmarshal(data, &b); err != nil {

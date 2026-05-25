@@ -104,4 +104,7 @@ Scrape the admin listener (`127.0.0.1:6060/metrics`). Key series:
 - PR-gating smoke load: `make test-load` (16 players × 60 s; P99 tick
   < 10 ms; bandwidth ≤ 12 KB/s/client; no goroutine leak).
 - Nightly / soak (operator-run): `make perf-nightly` (512-player
-  regression vs `testdata/perf_baseline.json`; 24 h soak).
+  regression vs `testdata/perf_baseline.json` ±20%; 24 h soak via
+  `go run scripts/loadtest.go --soak`). The committed baseline is
+  machine-specific — refresh it for your CI runner with
+  `go run scripts/loadtest.go --nightly --update-baseline` and commit.

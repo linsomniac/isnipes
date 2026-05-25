@@ -127,6 +127,7 @@ func runLoad(cfg Config, reg *observ.Registry) (Report, error) {
 	// count. (Full 24h soak is operator-run; the leak/RSS pass-fail uses the
 	// post-drain figures below.)
 	goroutineMax := before
+	var goroutineSamples []int // sampler-goroutine only; read after join (no race)
 	sampleStop := make(chan struct{})
 	var sampleDone sync.WaitGroup
 	if cfg.Soak {
@@ -142,6 +143,7 @@ func runLoad(cfg Config, reg *observ.Registry) (Report, error) {
 					return
 				case <-t.C:
 					g := runtime.NumGoroutine()
+					goroutineSamples = append(goroutineSamples, g)
 					if g > goroutineMax {
 						goroutineMax = g
 					}
@@ -166,6 +168,15 @@ func runLoad(cfg Config, reg *observ.Registry) (Report, error) {
 	wg.Wait() // all clients return when the run context (Duration) expires
 	close(sampleStop)
 	sampleDone.Wait()
+
+	// Goroutine TREND across the soak: last steady-state sample minus the
+	// first. A non-leaking sustained load plateaus (≈0); an upward trend is
+	// a leak even if the goroutines are released on cancellation (which the
+	// post-drain Before/After check would miss).
+	goroutineGrowth := 0
+	if n := len(goroutineSamples); n >= 2 {
+		goroutineGrowth = goroutineSamples[n-1] - goroutineSamples[0]
+	}
 
 	teardown()
 
@@ -204,6 +215,7 @@ func runLoad(cfg Config, reg *observ.Registry) (Report, error) {
 		GoroutinesBefore:        before,
 		GoroutinesAfter:         after,
 		GoroutineMax:            goroutineMax,
+		GoroutineGrowth:         goroutineGrowth,
 		RSSStartBytes:           rssStart,
 		RSSEndBytes:             rssEnd,
 		ClientErrors:            int(stats.errors.Load()),

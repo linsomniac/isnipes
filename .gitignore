@@ -15,6 +15,3 @@ coverage.out
 # Phase 8: embedded client build artifacts (produced by `make build`).
 /cmd/isnipes/dist/*
 !/cmd/isnipes/dist/.gitkeep
-
-# Phase 8: nightly perf baseline is seeded per-environment.
-/testdata/perf_baseline.json
