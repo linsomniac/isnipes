@@ -12,7 +12,7 @@ jobs:
   build-test:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           fetch-depth: 0 # need the base ref for the path-diff gate
 
@@ -28,7 +28,7 @@ jobs:
           git show "origin/${{ github.base_ref }}:scripts/check-frozen-paths.sh" > /tmp/frozen-gate.sh
           bash /tmp/frozen-gate.sh "origin/${{ github.base_ref }}"
 
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@v6
         with:
           go-version: '1.26'
 
@@ -37,7 +37,7 @@ jobs:
         run: make test-race
       - run: make test-testhooks
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v6
         with:
           node-version: '20'
       - run: npm -C web ci
