@@ -3,9 +3,8 @@
 package buildguard
 
 import (
-	"crypto/sha256"
-	"encoding/hex"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -25,38 +24,44 @@ func repoRoot(t *testing.T) string {
 	return root
 }
 
-// loadManifest parses scripts/frozen.sha256 into path→sha.
-func loadManifest(t *testing.T, root string) map[string]string {
+// loadManifest parses scripts/frozen.sha256 into path→sha and also returns
+// the ordered list of repo-relative paths it covers.
+func loadManifest(t *testing.T, root string) (map[string]string, []string) {
 	t.Helper()
 	raw, err := os.ReadFile(filepath.Join(root, "scripts", "frozen.sha256"))
 	if err != nil {
 		t.Fatalf("read manifest: %v", err)
 	}
 	m := map[string]string{}
+	var paths []string
 	for _, line := range strings.Split(strings.TrimSpace(string(raw)), "\n") {
 		fields := strings.Fields(line)
 		if len(fields) != 2 {
 			t.Fatalf("malformed manifest line: %q", line)
 		}
 		m[fields[1]] = fields[0]
+		paths = append(paths, fields[1])
 	}
-	return m
+	return m, paths
 }
 
-// goSources lists *.go under dir (relative to root), optionally excluding
-// _test.go, as repo-relative slash paths.
-func goSources(t *testing.T, root, dir string, includeTests bool) []string {
+// listFiles walks dir (relative to root) returning repo-relative slash
+// paths. When onlyGoNonTest is set, restricts to *.go excluding _test.go;
+// otherwise returns every regular file.
+func listFiles(t *testing.T, root, dir string, onlyGoNonTest bool) []string {
 	t.Helper()
 	var out []string
 	err := filepath.WalkDir(filepath.Join(root, dir), func(p string, d os.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
-		if d.IsDir() || !strings.HasSuffix(p, ".go") {
+		if d.IsDir() {
 			return nil
 		}
-		if !includeTests && strings.HasSuffix(p, "_test.go") {
-			return nil
+		if onlyGoNonTest {
+			if !strings.HasSuffix(p, ".go") || strings.HasSuffix(p, "_test.go") {
+				return nil
+			}
 		}
 		rel, err := filepath.Rel(root, p)
 		if err != nil {
@@ -72,12 +77,13 @@ func goSources(t *testing.T, root, dir string, includeTests bool) []string {
 }
 
 // TestFrozen_GuardCoversProto asserts the frozen manifest covers every
-// wire-schema source (all non-test internal/proto/*.go) and the whole
-// deterministic sim (internal/sim/**), so the "no wire change" invariant
-// (PHASE8 §1, DoD #2) is mechanically backed rather than aspirational.
+// wire-schema source (all non-test internal/proto/*.go) and the WHOLE
+// deterministic sim tree (internal/sim/** — sources, replay + maze
+// fixtures), so the "no wire change / no sim drift" invariant (PHASE8 §1,
+// DoD #2) is mechanically backed rather than aspirational.
 func TestFrozen_GuardCoversProto(t *testing.T) {
 	root := repoRoot(t)
-	manifest := loadManifest(t, root)
+	manifest, _ := loadManifest(t, root)
 
 	var missing []string
 	check := func(files []string) {
@@ -87,11 +93,11 @@ func TestFrozen_GuardCoversProto(t *testing.T) {
 			}
 		}
 	}
-	check(goSources(t, root, "internal/proto", false)) // wire encoders, no tests
-	check(goSources(t, root, "internal/sim", true))    // determinism, incl. tests
+	check(listFiles(t, root, "internal/proto", true)) // wire encoders, no tests
+	check(listFiles(t, root, "internal/sim", false))  // ALL files incl. testdata
 
 	if len(missing) != 0 {
-		t.Fatalf("frozen manifest does not cover %d source file(s); re-seed with "+
+		t.Fatalf("frozen manifest does not cover %d file(s); re-seed with "+
 			"scripts/check-frozen.sh --write:\n  %s", len(missing), strings.Join(missing, "\n  "))
 	}
 
@@ -107,34 +113,64 @@ func TestFrozen_GuardCoversProto(t *testing.T) {
 	}
 }
 
-// TestFrozen_GuardIsLiveAndDetectsEdits proves the manifest tracks the
-// CURRENT bytes of a wire file (not a stale hash) AND that any edit would
-// be caught: the recorded sha equals the file's sha now, and a one-byte
-// mutation produces a different sha that no longer matches the manifest.
-func TestFrozen_GuardIsLiveAndDetectsEdits(t *testing.T) {
-	root := repoRoot(t)
-	manifest := loadManifest(t, root)
-
-	const target = "internal/proto/messages.go"
-	want, ok := manifest[target]
-	if !ok {
-		t.Fatalf("%s missing from manifest", target)
+// copyTree copies each manifest path plus the guard script + manifest into
+// dst, preserving the repo-relative layout, so the guard can be executed
+// against an isolated copy.
+func copyTree(t *testing.T, srcRoot, dst string, paths []string) {
+	t.Helper()
+	all := append([]string{"scripts/check-frozen.sh", "scripts/frozen.sha256"}, paths...)
+	for _, rel := range all {
+		data, err := os.ReadFile(filepath.Join(srcRoot, rel))
+		if err != nil {
+			t.Fatalf("read %s: %v", rel, err)
+		}
+		dstPath := filepath.Join(dst, rel)
+		if err := os.MkdirAll(filepath.Dir(dstPath), 0o755); err != nil {
+			t.Fatalf("mkdir for %s: %v", rel, err)
+		}
+		mode := os.FileMode(0o644)
+		if strings.HasSuffix(rel, ".sh") {
+			mode = 0o755
+		}
+		if err := os.WriteFile(dstPath, data, mode); err != nil {
+			t.Fatalf("write %s: %v", rel, err)
+		}
 	}
-	content, err := os.ReadFile(filepath.Join(root, target))
+}
+
+// TestFrozen_GuardExecRejectsEdit is an integration test: it copies the
+// frozen tree + guard script into a temp dir, confirms the clean copy
+// passes, mutates internal/proto/messages.go, and requires the guard to
+// EXIT NON-ZERO — establishing the actual guard behavior DoD #2 promises
+// ("an edit to messages.go fails it"), not just that SHA-256 is injective.
+func TestFrozen_GuardExecRejectsEdit(t *testing.T) {
+	bash, err := exec.LookPath("bash")
 	if err != nil {
-		t.Fatalf("read %s: %v", target, err)
+		t.Skip("bash not available; guard is a bash script")
 	}
-	gotSum := sha256.Sum256(content)
-	got := hex.EncodeToString(gotSum[:])
-	if got != want {
-		t.Fatalf("manifest is stale for %s: manifest=%s actual=%s", target, want, got)
+	root := repoRoot(t)
+	_, paths := loadManifest(t, root)
+
+	dst := t.TempDir()
+	copyTree(t, root, dst, paths)
+	script := filepath.Join(dst, "scripts", "check-frozen.sh")
+
+	// Clean copy must pass.
+	if out, err := exec.Command(bash, script).CombinedOutput(); err != nil {
+		t.Fatalf("guard failed on a clean copy: %v\n%s", err, out)
 	}
 
-	// Simulated edit: append a byte. The guard recomputes sha256 over file
-	// bytes (scripts/check-frozen.sh uses sha256sum), so a mutated file would
-	// hash differently and `make check-frozen` would fail.
-	mutated := sha256.Sum256(append(append([]byte{}, content...), '\n'))
-	if hex.EncodeToString(mutated[:]) == want {
-		t.Fatalf("a mutated %s hashed to the frozen value (impossible); guard would not catch edits", target)
+	// Mutate a frozen wire file; the guard must now fail.
+	target := filepath.Join(dst, "internal", "proto", "messages.go")
+	data, err := os.ReadFile(target)
+	if err != nil {
+		t.Fatalf("read copied messages.go: %v", err)
+	}
+	if err := os.WriteFile(target, append(data, '\n'), 0o644); err != nil {
+		t.Fatalf("mutate messages.go: %v", err)
+	}
+	out, err := exec.Command(bash, script).CombinedOutput()
+	if err == nil {
+		t.Fatalf("guard PASSED after editing messages.go; it must fail.\n%s", out)
 	}
 }
