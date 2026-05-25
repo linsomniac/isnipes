@@ -22,10 +22,11 @@ type ServerConfig struct {
 	Lobby            *lobby.Lobby
 	MatchRegistry    *match.Registry
 	StaticFS         fs.FS
-	HandshakeTimeout time.Duration // default 5s
-	IdleTimeout      time.Duration // default 5s
-	PingInterval     time.Duration // Phase 4 §4.3.3: default 500ms
-	ServerVersion    string
+	HandshakeTimeout  time.Duration // default 5s
+	IdleTimeout       time.Duration // default 5s
+	PingInterval      time.Duration // Phase 4 §4.3.3: default 500ms (match keepalive)
+	LobbyPingInterval time.Duration // lobby WS keepalive; default lobbyPingInterval
+	ServerVersion     string
 
 	// Phase 8 § transport-security — WebSocket origin policy. Default
 	// (both zero) enforces nhooyr's SAME-HOST check: the browser's Origin
@@ -66,6 +67,9 @@ func NewServer(cfg ServerConfig) *Server {
 	}
 	if cfg.PingInterval == 0 {
 		cfg.PingInterval = 500 * time.Millisecond
+	}
+	if cfg.LobbyPingInterval == 0 {
+		cfg.LobbyPingInterval = lobbyPingInterval
 	}
 	if cfg.ServerVersion == "" {
 		cfg.ServerVersion = "v1.0.0"
@@ -110,6 +114,23 @@ func (s *Server) version(w http.ResponseWriter, _ *http.Request) {
 	})
 }
 
+// Lobby keepalive: unlike the match path (where the client streams input +
+// pongs at 30Hz so reads never go idle), the lobby client is silent between
+// user actions — a player who simply reads the lobby screen sends nothing.
+// So the reader CANNOT impose a short idle deadline (it would drop an
+// idle-but-alive player; the browser auto-replies to WS pings as control
+// frames, which nhooyr handles internally and never surface from c.Read, so
+// a per-read deadline would still fire). Instead the writer sends a periodic
+// WebSocket ping and treats a missing pong as a dead peer; the reader blocks
+// on the connection context, which that failure cancels.
+// AIDEV-NOTE: do NOT reintroduce a per-read idle timeout on the lobby socket
+// — it silently closes idle lobbies, surfacing client-side as "WebSocket is
+// already in a closing or closed state" on the next user action.
+const (
+	lobbyPingInterval = 20 * time.Second
+	lobbyPongTimeout  = 10 * time.Second
+)
+
 // handleLobby upgrades a lobby WS and forwards messages.
 func (s *Server) handleLobby(w http.ResponseWriter, r *http.Request) {
 	c, err := websocket.Accept(w, r, s.acceptOptions())
@@ -121,35 +142,57 @@ func (s *Server) handleLobby(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithCancel(r.Context())
 	defer cancel()
 
-	// Writer goroutine.
+	// Writer goroutine: drains outbound lobby messages and keeps the
+	// connection alive with periodic pings (see the keepalive note above).
 	go func() {
-		for o := range out {
-			b, err := proto.EncodeLobbyMessage(o.Type, o.Payload)
-			if err != nil {
-				continue
-			}
-			ctxW, ctxWCancel := context.WithTimeout(ctx, 2*time.Second)
-			err = c.Write(ctxW, websocket.MessageText, b)
-			ctxWCancel()
-			if err != nil {
-				cancel()
+		ticker := time.NewTicker(s.cfg.LobbyPingInterval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				_ = c.Close(websocket.StatusNormalClosure, "ok")
 				return
-			}
-			if o.CloseCode != 0 {
-				_ = c.Close(websocket.StatusCode(o.CloseCode), "")
-				cancel()
-				return
+			case <-ticker.C:
+				pingCtx, pingCancel := context.WithTimeout(ctx, lobbyPongTimeout)
+				err := c.Ping(pingCtx)
+				pingCancel()
+				if err != nil {
+					cancel()
+					return
+				}
+				// Pong received → peer is alive; refresh the lobby idle
+				// timer so the actor's sweep doesn't reap a quiet session.
+				s.cfg.Lobby.Touch(sess.ID)
+			case o, ok := <-out:
+				if !ok {
+					_ = c.Close(websocket.StatusNormalClosure, "ok")
+					return
+				}
+				b, err := proto.EncodeLobbyMessage(o.Type, o.Payload)
+				if err != nil {
+					continue
+				}
+				ctxW, ctxWCancel := context.WithTimeout(ctx, 2*time.Second)
+				err = c.Write(ctxW, websocket.MessageText, b)
+				ctxWCancel()
+				if err != nil {
+					cancel()
+					return
+				}
+				if o.CloseCode != 0 {
+					_ = c.Close(websocket.StatusCode(o.CloseCode), "")
+					cancel()
+					return
+				}
 			}
 		}
-		_ = c.Close(websocket.StatusNormalClosure, "ok")
 	}()
 
-	// Reader loop.
+	// Reader loop. Bound only by the connection context: the writer's ping
+	// keepalive (not a read deadline) is what detects a dead peer.
+	c.SetReadLimit(64 * 1024)
 	for {
-		c.SetReadLimit(64 * 1024)
-		ctxR, ctxRCancel := context.WithTimeout(ctx, s.cfg.IdleTimeout+5*time.Second)
-		mtype, data, err := c.Read(ctxR)
-		ctxRCancel()
+		mtype, data, err := c.Read(ctx)
 		if err != nil {
 			break
 		}

@@ -144,6 +144,14 @@ type ctlDisconnect struct {
 	SessionID SessionID
 }
 
+// ctlTouch refreshes a session's lastSeen from a transport-level keepalive
+// (a WS pong) so the idle sweep doesn't reap a connection that is alive but
+// quiet — the lobby client legitimately sends no messages while a player
+// reads the screen. See net.handleLobby's ping keepalive.
+type ctlTouch struct {
+	SessionID SessionID
+}
+
 type ctlMatchEnded struct{ MatchID string }
 
 type ctlJanitor struct{}
@@ -151,6 +159,7 @@ type ctlJanitor struct{}
 func (ctlConnect) controlTag()    {}
 func (ctlMessage) controlTag()    {}
 func (ctlDisconnect) controlTag() {}
+func (ctlTouch) controlTag()      {}
 func (ctlMatchEnded) controlTag() {}
 func (ctlJanitor) controlTag()    {}
 
@@ -201,6 +210,19 @@ func (l *Lobby) Disconnect(sid SessionID) {
 	}
 }
 
+// Touch refreshes a session's idle timer from a transport keepalive (WS
+// pong). Non-blocking and safe to drop: it's a liveness hint, not state.
+func (l *Lobby) Touch(sid SessionID) {
+	if l.stopped.Load() {
+		return
+	}
+	select {
+	case l.in <- ctlTouch{SessionID: sid}:
+	case <-l.done:
+	default:
+	}
+}
+
 // Run drives the actor. Returns when Stop is called.
 func (l *Lobby) Run() {
 	interval := l.cfg.JanitorInterval
@@ -240,6 +262,10 @@ func (l *Lobby) handle(msg controlMsg) {
 		l.handleMessage(v)
 	case ctlDisconnect:
 		l.handleDisconnect(v)
+	case ctlTouch:
+		if s, ok := l.sessions[v.SessionID]; ok {
+			s.lastSeen = l.clock()
+		}
 	case ctlMatchEnded:
 		l.handleMatchEnded(v)
 	}

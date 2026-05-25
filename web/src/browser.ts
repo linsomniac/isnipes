@@ -55,7 +55,9 @@ interface UI {
   myRoom: HTMLElement;
   myRoomId: HTMLElement;
   myRoomPlayers: HTMLElement;
+  myRoomLink: HTMLAnchorElement;
   startBtn: HTMLButtonElement;
+  startHint: HTMLElement;
   roomList: HTMLElement;
   picker: HTMLElement;
   pickerPreview: HTMLElement;
@@ -90,10 +92,15 @@ function buildDOM(settings: Settings): UI {
 
   const myRoomId = el("span", { "data-testid": "my-room-id" });
   const myRoomPlayers = el("span", { "data-testid": "room-players" });
-  const startBtn = el("button", { id: "start-btn", "data-testid": "start-btn" }, "Start") as HTMLButtonElement;
+  const startBtn = el("button", { id: "start-btn", "data-testid": "start-btn" }, "Start match") as HTMLButtonElement;
   startBtn.disabled = true;
+  const startHint = el("span", { "data-testid": "start-hint" });
+  const myRoomLink = el("a", { "data-testid": "room-link", target: "_blank", rel: "noopener" }) as HTMLAnchorElement;
   const myRoom = el("div", { id: "my-room", "data-testid": "my-room", hidden: "true" });
-  myRoom.append(text("Your room: "), myRoomId, text(" ("), myRoomPlayers, text(")  "), startBtn);
+  myRoom.append(text("Your room: "), myRoomId, text(" ("), myRoomPlayers, text(")  "), startBtn, text(" "), startHint);
+  const invite = el("div", { "data-testid": "invite" });
+  invite.append(text("Invite a player — open this link in another browser window: "), myRoomLink);
+  myRoom.append(invite);
 
   const roomList = el("ul", { id: "room-list", "data-testid": "room-list" });
   const picker = el("div", { id: "level-picker", "data-testid": "level-picker" });
@@ -120,9 +127,19 @@ function buildDOM(settings: Settings): UI {
     labeled("Volume", volSlider), labeled("Server", serverInput), serverAddBtn, serverList,
   );
 
+  const howto = el("ol", { "data-testid": "howto" });
+  for (const step of [
+    "Pick a level below (optional — A1 is the default).",
+    "Click “Create Room” to open a room you host.",
+    "Get a second player in: open your room’s invite link in another browser window, or have them click “Join” next to your room in the list. A match needs at least 2 players.",
+    "Click “Start match” once someone has joined.",
+  ]) howto.append(el("li", {}, step));
+  const howtoBox = el("section", { "data-testid": "howto-box" });
+  howtoBox.append(el("h2", {}, "How to start a game"), howto);
+
   const lobby = el("section", { id: "lobby", "data-testid": "lobby", hidden: "true" });
   lobby.append(
-    el("h1", {}, "Lobby"), createBtn, myRoom,
+    el("h1", {}, "Lobby"), howtoBox, createBtn, myRoom,
     el("h2", {}, "Levels"), picker, pickerPreview,
     el("h2", {}, "Rooms"), roomList, settingsPanel,
   );
@@ -144,10 +161,10 @@ function buildDOM(settings: Settings): UI {
   document.body.append(status, connecting, lobby, match);
 
   const ui: UI = {
-    connecting, lobby, createBtn, nickInput, myRoom, myRoomId, myRoomPlayers, startBtn,
-    roomList, picker, pickerPreview, serverInput, serverList, cbToggle, hcToggle, volSlider,
-    presetSelect, match, matchView, canvas, minimap, stats, scoreboard, chatBox, chatInput,
-    endDialog, backBtn, status,
+    connecting, lobby, createBtn, nickInput, myRoom, myRoomId, myRoomPlayers, myRoomLink,
+    startBtn, startHint, roomList, picker, pickerPreview, serverInput, serverList, cbToggle,
+    hcToggle, volSlider, presetSelect, match, matchView, canvas, minimap, stats, scoreboard,
+    chatBox, chatInput, endDialog, backBtn, status,
   };
   serverAddBtn.onclick = () => {
     const next = addServer(settings.servers, serverInput.value, location.protocol);
@@ -201,11 +218,29 @@ function renderServerList(ui: UI, settings: Settings): void {
   }
 }
 
-function renderRooms(listEl: HTMLElement, rooms: RoomDescriptor[]): void {
+function renderRooms(
+  listEl: HTMLElement,
+  rooms: RoomDescriptor[],
+  onJoin?: (roomId: string) => void,
+  myRoomId?: string | null,
+): void {
   listEl.innerHTML = "";
+  if (rooms.length === 0) {
+    listEl.append(el("li", { "data-testid": "no-rooms" }, "No rooms yet — click “Create Room” to make one."));
+    return;
+  }
   for (const r of rooms) {
     const li = el("li", { "data-testid": "room-row", "data-room-id": r.id });
-    li.textContent = `${r.id} — ${r.name} (${r.players}/${r.max}) [${r.state}]`;
+    li.append(text(`${r.id} — ${r.name} (${r.players}/${r.max}) [${r.state}]  `));
+    if (onJoin && r.id !== myRoomId) {
+      const joinBtn = el("button", {
+        "data-testid": "join-room", "data-room-id": r.id,
+      }, "Join") as HTMLButtonElement;
+      // Can't join a room that's full or already in a match.
+      joinBtn.disabled = r.players >= r.max || r.state !== "open";
+      joinBtn.onclick = () => onJoin(r.id);
+      li.append(joinBtn);
+    }
     listEl.append(li);
   }
 }
@@ -553,10 +588,20 @@ async function boot(): Promise<void> {
   });
 
   let myRoomId: string | null = null;
+  let joinedRoomId: string | null = null;
   let pendingCreateName: string | null = null;
   let preCreateIds = new Set<string>();
   let selectedLevel = { letter: "A", number: 1 };
   let runner: MatchRunner | null = null;
+
+  const inviteLinkFor = (roomId: string): string =>
+    `${location.origin}${location.pathname}?room=${roomId}`;
+
+  const onJoinRoom = (roomId: string): void => {
+    joinedRoomId = roomId;
+    app.lobby.joinRoom(roomId);
+    ui.status.textContent = `Joined room ${roomId} — waiting for the host to start…`;
+  };
 
   ui.createBtn.onclick = () => {
     const name = "Room-" + Math.random().toString(36).slice(2, 6);
@@ -579,12 +624,22 @@ async function boot(): Promise<void> {
   app.lobby.onRoomListChange = (rooms) => {
     if (myRoomId === null && pendingCreateName !== null) {
       const mine = rooms.find((r) => r.name === pendingCreateName && !preCreateIds.has(r.id));
-      if (mine) { myRoomId = mine.id; pendingCreateName = null; ui.myRoomId.textContent = mine.id; ui.myRoom.hidden = false; }
+      if (mine) {
+        myRoomId = mine.id; pendingCreateName = null;
+        ui.myRoomId.textContent = mine.id; ui.myRoom.hidden = false;
+        ui.myRoomLink.href = inviteLinkFor(mine.id);
+        ui.myRoomLink.textContent = inviteLinkFor(mine.id);
+      }
     }
-    renderRooms(ui.roomList, rooms);
+    renderRooms(ui.roomList, rooms, onJoinRoom, myRoomId ?? joinedRoomId);
     if (myRoomId !== null) {
       const mine = rooms.find((r) => r.id === myRoomId);
-      if (mine) { ui.myRoomPlayers.textContent = `${mine.players}/${mine.max}`; ui.startBtn.disabled = mine.players < 2; }
+      if (mine) {
+        ui.myRoomPlayers.textContent = `${mine.players}/${mine.max}`;
+        const canStart = mine.players >= 2;
+        ui.startBtn.disabled = !canStart;
+        ui.startHint.textContent = canStart ? "" : "(waiting for a second player to join…)";
+      }
     }
   };
   app.onMatchStarted = (ms: MatchStarted) => {
