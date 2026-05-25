@@ -91,6 +91,11 @@ type PendingJoin struct {
 	IssuedAt time.Time
 }
 
+// TickObserver records a single tick's duration. *observ.Histogram and
+// *observ.RecordingSampler satisfy it structurally, so internal/match takes
+// no dependency on the metrics/HTTP surface (PHASE8 §6.4, OQ §19.5).
+type TickObserver interface{ Observe(d time.Duration) }
+
 // MatchConfig is supplied at construction.
 type MatchConfig struct {
 	MatchID     string
@@ -110,6 +115,13 @@ type MatchConfig struct {
 	// means use the default DCGraceTicks (30 s @ 30 Hz). Production
 	// callers leave this zero.
 	DCGraceTicksOverride uint32
+
+	// Phase 8 §6.4/§6.5 observability hooks. All nil-safe: a Match with
+	// none set behaves exactly as before. Populated by the Registry from
+	// RegistryConfig.
+	TickSampler      TickObserver // Observe(tickDuration)
+	OnTickOverBudget func()       // tick exceeded the 33ms budget
+	OnSnapshotDrop   func()       // a snapshot was suppressed to catch up
 }
 
 // controlMsg is the internal inbox payload.
@@ -157,6 +169,11 @@ type ctlReconnect struct {
 	Reply chan<- joinResult
 }
 
+// Phase 8 §7.2 — graceful shutdown. Ends the match cleanly (no
+// SERVER_ERROR MatchOver, so it is not counted as a MatchAbort) so the
+// Run goroutine exits and the registry drains deterministically.
+type ctlShutdown struct{}
+
 func (ctlJoin) controlTag()        {}
 func (ctlInput) controlTag()       {}
 func (ctlPong) controlTag()        {}
@@ -165,6 +182,7 @@ func (ctlAbort) controlTag()       {}
 func (ctlDC) controlTag()          {}
 func (ctlReconnect) controlTag()   {}
 func (ctlRevokeToken) controlTag() {}
+func (ctlShutdown) controlTag()    {}
 
 // Match is the actor. Construct with NewMatch and run via Run().
 type Match struct {
@@ -179,6 +197,14 @@ type Match struct {
 	endedAt          time.Time
 	clock            func() time.Time
 	ticker           Ticker
+
+	// Phase 8 §6.4/§6.5 — nil-safe tick instrumentation + over-budget
+	// snapshot suppression. overBudget is set when a tick runs long and
+	// consumed (one-shot) by the next scheduled snapshot.
+	tickObserver     TickObserver
+	onTickOverBudget func()
+	onSnapshotDrop   func()
+	overBudget       bool
 
 	// per-player input buffer: latest input received since previous tick.
 	pendingInputs map[sim.EntityID]proto.Input
@@ -265,6 +291,10 @@ func NewMatch(cfg MatchConfig) (*Match, error) {
 		dcTokens:      make(map[string]sim.EntityID),
 		lastScores:    newScoreSnapshot(),
 		done:          make(chan struct{}),
+
+		tickObserver:     cfg.TickSampler,
+		onTickOverBudget: cfg.OnTickOverBudget,
+		onSnapshotDrop:   cfg.OnSnapshotDrop,
 	}
 	for _, p := range cfg.PlayerSlots {
 		m.slots[p.PlayerID] = &Slot{PlayerID: p.PlayerID, Nick: p.Nick, closed: make(chan struct{})}
@@ -455,7 +485,9 @@ func (m *Match) Run() {
 					m.startOrAbort()
 				}
 			case StateLive:
+				start := m.clock()
 				m.tick()
+				m.recordTick(m.clock().Sub(start))
 				if m.state() == StateEnded {
 					return
 				}
@@ -503,6 +535,8 @@ func (m *Match) handleControl(msg controlMsg) {
 		delete(m.bySession, v.Token)
 	case ctlChat:
 		m.handleChat(v)
+	case ctlShutdown:
+		m.shutdown()
 	}
 }
 
@@ -748,9 +782,19 @@ func (m *Match) tick() {
 	// broadcast.
 	m.maybeBroadcastScoreboard()
 
-	// Broadcast snapshot every snapshotEveryTicks.
+	// Broadcast snapshot every snapshotEveryTicks. SPEC §11 over-budget
+	// catch-up: if the previous tick ran over budget, suppress exactly the
+	// next scheduled snapshot beat (one-shot; never accumulate) and count
+	// the drop. PHASE8 §6.5.
 	if m.sim.ServerTick()%snapshotEveryTicks == 0 {
-		m.broadcastSnapshot()
+		if m.overBudget {
+			m.overBudget = false
+			if m.onSnapshotDrop != nil {
+				m.onSnapshotDrop()
+			}
+		} else {
+			m.broadcastSnapshot()
+		}
 	}
 
 	// Evaluate match end (§9.3).
@@ -910,6 +954,48 @@ func (m *Match) buildMatchOverEntries(winner sim.EntityID, reason uint8) []proto
 	}
 	sortEntries(entries)
 	return entries
+}
+
+// recordTick reports a completed tick's duration to the observability
+// hooks (all nil-safe) and arms the one-shot over-budget flag consumed by
+// the next scheduled snapshot (§6.4/§6.5).
+func (m *Match) recordTick(d time.Duration) {
+	if m.tickObserver != nil {
+		m.tickObserver.Observe(d)
+	}
+	if d > tickInterval {
+		m.overBudget = true
+		if m.onTickOverBudget != nil {
+			m.onTickOverBudget()
+		}
+	}
+}
+
+// SubmitShutdown asks the actor to end the match cleanly. Safe to call once
+// the actor has already exited (it selects on done). PHASE8 §7.2.
+func (m *Match) SubmitShutdown() {
+	select {
+	case m.in <- ctlShutdown{}:
+	case <-m.done:
+	}
+}
+
+// shutdown ends the match gracefully: no SERVER_ERROR MatchOver (so the
+// load harness does not count it as a MatchAbort) — clients simply get a
+// clean WS close. Used for process shutdown and deterministic test
+// teardown. PHASE8 §7.2.
+func (m *Match) shutdown() {
+	if m.state() == StateEnded {
+		return
+	}
+	m.setState(StateEnded)
+	m.endedAt = m.clock()
+	for _, slot := range m.slots {
+		if slot.out != nil {
+			m.closeSlot(slot)
+		}
+	}
+	m.drainInboxAfterEnd()
 }
 
 // abort transitions to ENDED with reason SERVER_ERROR (or NO_OPPONENT).

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"sync"
+	"time"
 )
 
 // ErrTooManyMatches is surfaced when Create would exceed the cap.
@@ -12,6 +13,12 @@ var ErrTooManyMatches = errors.New("match: too many concurrent matches")
 // RegistryConfig governs concurrency and lifecycle.
 type RegistryConfig struct {
 	MaxConcurrentMatches int // default 64 (§5.3 of SPEC)
+
+	// Phase 8 §6.4/§6.5 observability hooks, threaded into every Match's
+	// MatchConfig at Create time. All nil-safe.
+	TickSampler      TickObserver
+	OnTickOverBudget func()
+	OnSnapshotDrop   func()
 }
 
 // Registry is the lookup table of live matches. It is safe for
@@ -41,6 +48,10 @@ func (r *Registry) Create(mc MatchConfig) (*Match, error) {
 	if _, dup := r.matches[mc.MatchID]; dup {
 		return nil, errors.New("match: duplicate MatchID")
 	}
+	// Thread the observability hooks from the registry into the match.
+	mc.TickSampler = r.cfg.TickSampler
+	mc.OnTickOverBudget = r.cfg.OnTickOverBudget
+	mc.OnSnapshotDrop = r.cfg.OnSnapshotDrop
 	m, err := NewMatch(mc)
 	if err != nil {
 		return nil, err
@@ -66,6 +77,52 @@ func (r *Registry) RemoveEnded(id string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	delete(r.matches, id)
+}
+
+// Len reports the number of live matches.
+func (r *Registry) Len() int {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return len(r.matches)
+}
+
+// StopAll signals every live match to end cleanly (ctlShutdown → graceful
+// close, NOT SERVER_ERROR, so it is not counted as a MatchAbort) and waits
+// until the registry drains or ctx is done. Used by graceful process
+// shutdown and the load-harness teardown so a goroutine-leak check samples
+// after a deterministic drain (Registry.Close alone does not stop matches).
+// PHASE8 §7.2.
+func (r *Registry) StopAll(ctx context.Context) error {
+	r.mu.RLock()
+	matches := make([]*Match, 0, len(r.matches))
+	for _, m := range r.matches {
+		matches = append(matches, m)
+	}
+	r.mu.RUnlock()
+
+	for _, m := range matches {
+		m.SubmitShutdown()
+	}
+
+	// Wait for each Run goroutine to exit, then for RemoveEnded to drain
+	// the map (RemoveEnded runs just after Run returns / done closes).
+	for _, m := range matches {
+		select {
+		case <-m.done:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+	ticker := time.NewTicker(time.Millisecond)
+	defer ticker.Stop()
+	for r.Len() > 0 {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-ticker.C:
+		}
+	}
+	return nil
 }
 
 // Close shuts down the registry. It does not signal individual
