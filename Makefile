@@ -1,4 +1,4 @@
-.PHONY: build test test-race test-testhooks test-synthetic vet fmt clean run check-frozen
+.PHONY: build test test-race test-testhooks test-synthetic test-load vet fmt clean run check-frozen
 
 BIN := isnipes
 
@@ -24,6 +24,12 @@ test-testhooks:
 
 test-synthetic:
 	go test -race -count=1 -tags synthetic ./...
+
+# PHASE8.md DoD #3-#6 — PR-gating smoke load (16 players × 60s; P99 tick
+# < 10ms; bandwidth ≤ 12 KB/s; no goroutine leak). Its own step so it does
+# not slow the default unit run. Use `go test -short` locally for a 5s pass.
+test-load:
+	go test -race -count=1 -tags loadtest ./internal/loadtest/...
 
 # PHASE7.md DoD #2 — fail if a frozen wire-schema / sim file changed.
 check-frozen:

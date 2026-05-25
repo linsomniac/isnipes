@@ -42,6 +42,13 @@ type ServerConfig struct {
 	// InsecureOrigin disables the check entirely — DEV ONLY; never in prod.
 	AllowedOrigins []string
 	InsecureOrigin bool
+
+	// Phase 8 §6.2 — optional, nil-safe match-traffic byte counters wired
+	// to the observ registry's bytes_in/out_total series. Count the raw
+	// WebSocket message bytes on the match path (the bandwidth-relevant
+	// traffic).
+	OnBytesIn  func(n int)
+	OnBytesOut func(n int)
 }
 
 // Server is the Phase 2 transport surface.
@@ -186,6 +193,9 @@ func (s *Server) handleMatch(w http.ResponseWriter, r *http.Request) {
 		_ = closeWith(c, CloseIdle)
 		return
 	}
+	if s.cfg.OnBytesIn != nil {
+		s.cfg.OnBytesIn(len(data))
+	}
 	if mtype != websocket.MessageBinary {
 		_ = closeWith(c, CloseMalformed)
 		return
@@ -245,6 +255,9 @@ func (s *Server) handleMatch(w http.ResponseWriter, r *http.Request) {
 				cancel()
 				return false
 			}
+			if s.cfg.OnBytesOut != nil {
+				s.cfg.OnBytesOut(len(buf))
+			}
 			return true
 		}
 		for {
@@ -278,6 +291,9 @@ func (s *Server) handleMatch(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			m.SubmitDC(pid)
 			return
+		}
+		if s.cfg.OnBytesIn != nil {
+			s.cfg.OnBytesIn(len(data))
 		}
 		if mtype != websocket.MessageBinary {
 			_ = closeWith(c, CloseMalformed)

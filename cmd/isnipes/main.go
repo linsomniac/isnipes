@@ -114,6 +114,8 @@ func main() {
 		ServerVersion:  version,
 		AllowedOrigins: splitOrigins(*allowedOrigins),
 		InsecureOrigin: *insecureOrigin,
+		OnBytesIn:      func(n int) { metrics.AddBytesIn(uint64(n)) },
+		OnBytesOut:     func(n int) { metrics.AddBytesOut(uint64(n)) },
 	})
 
 	// Public listener: client + WS only. Never /metrics or pprof.
