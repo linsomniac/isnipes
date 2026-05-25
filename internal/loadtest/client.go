@@ -64,22 +64,33 @@ func runClient(ctx context.Context, wsURL, token string, inputHz int, stats *cli
 		for {
 			_, data, err := c.Read(ctx)
 			if err != nil {
+				// An error while the run is still active means the client
+				// dropped unexpectedly (server closed the socket, etc.) — a
+				// real failure the gate must see. ctx cancellation at
+				// end-of-run is expected and not an error.
+				if ctx.Err() == nil {
+					stats.addError()
+				}
 				return
 			}
 			stats.addIn(len(data))
 			hdr, payload, _, err := proto.DecodeFrame(data)
 			if err != nil {
+				stats.addError() // a corrupt frame is always a failure
 				return
 			}
 			switch hdr.Type {
 			case proto.MsgSnapshot:
-				if snap, err := proto.DecodeSnapshot(payload); err == nil {
-					mu.Lock()
-					ts, ok := sendAt[snap.YourLastInputTick]
-					mu.Unlock()
-					if ok {
-						stats.addLatency(time.Since(ts))
-					}
+				snap, err := proto.DecodeSnapshot(payload)
+				if err != nil {
+					stats.addError() // malformed snapshot is a protocol failure
+					continue
+				}
+				mu.Lock()
+				ts, ok := sendAt[snap.YourLastInputTick]
+				mu.Unlock()
+				if ok {
+					stats.addLatency(time.Since(ts))
 				}
 			case proto.MsgMatchOver:
 				// A SERVER_ERROR end is a real abort; a clean StopAll sends

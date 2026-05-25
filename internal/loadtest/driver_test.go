@@ -1,8 +1,14 @@
 package loadtest
 
 import (
+	"context"
+	"net/http"
+	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
+
+	"nhooyr.io/websocket"
 
 	"github.com/jafo/isnipes/internal/observ"
 )
@@ -32,6 +38,33 @@ func TestLoad_DriverSmall(t *testing.T) {
 	}
 	if rep.GoroutineLeaked(2) {
 		t.Fatalf("goroutine leak: before=%d after=%d", rep.GoroutinesBefore, rep.GoroutinesAfter)
+	}
+}
+
+// TestLoad_ClientCountsMidRunDrop — a client whose socket the server drops
+// mid-run (before the duration elapses) must record an error, so the gate
+// can't pass after clients silently disconnected. (codex)
+func TestLoad_ClientCountsMidRunDrop(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/ws/match/", func(w http.ResponseWriter, r *http.Request) {
+		c, err := websocket.Accept(w, r, &websocket.AcceptOptions{InsecureSkipVerify: true})
+		if err != nil {
+			return
+		}
+		// Consume the MatchJoin, then drop abruptly mid-run.
+		_, _, _ = c.Read(r.Context())
+		c.Close(websocket.StatusInternalError, "boom")
+	})
+	ts := httptest.NewServer(mux)
+	defer ts.Close()
+
+	stats := &clientStats{}
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	runClient(ctx, strings.Replace(ts.URL, "http://", "ws://", 1)+"/ws/match/x", "tok", 30, stats)
+
+	if stats.errors.Load() == 0 {
+		t.Fatal("expected a client error when the server drops the socket mid-run")
 	}
 }
 
