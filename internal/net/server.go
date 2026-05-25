@@ -26,6 +26,15 @@ type ServerConfig struct {
 	IdleTimeout      time.Duration // default 5s
 	PingInterval     time.Duration // Phase 4 §4.3.3: default 500ms
 	ServerVersion    string
+
+	// Phase 8 § transport-security — WebSocket origin policy. Default
+	// (both zero) enforces SAME-ORIGIN: a browser may only open the WS
+	// from a page served by this same host, blocking cross-site WebSocket
+	// hijacking. AllowedOrigins widens that to additional hosts (nhooyr
+	// OriginPatterns, e.g. "localhost:5173" for a separate dev front-end).
+	// InsecureOrigin disables the check entirely — DEV ONLY; never in prod.
+	AllowedOrigins []string
+	InsecureOrigin bool
 }
 
 // Server is the Phase 2 transport surface.
@@ -48,6 +57,16 @@ func NewServer(cfg ServerConfig) *Server {
 		cfg.ServerVersion = "v0.0.0-phase2"
 	}
 	return &Server{cfg: cfg}
+}
+
+// acceptOptions builds the WebSocket accept options from the configured
+// origin policy. With InsecureOrigin=false and no AllowedOrigins, nhooyr
+// enforces same-origin (the secure default).
+func (s *Server) acceptOptions() *websocket.AcceptOptions {
+	return &websocket.AcceptOptions{
+		InsecureSkipVerify: s.cfg.InsecureOrigin,
+		OriginPatterns:     s.cfg.AllowedOrigins,
+	}
 }
 
 // Handler returns an http.Handler with all routes mounted.
@@ -79,9 +98,7 @@ func (s *Server) version(w http.ResponseWriter, _ *http.Request) {
 
 // handleLobby upgrades a lobby WS and forwards messages.
 func (s *Server) handleLobby(w http.ResponseWriter, r *http.Request) {
-	c, err := websocket.Accept(w, r, &websocket.AcceptOptions{
-		InsecureSkipVerify: true, // dev-mode; production layers TLS
-	})
+	c, err := websocket.Accept(w, r, s.acceptOptions())
 	if err != nil {
 		return
 	}
@@ -145,9 +162,7 @@ func (s *Server) handleMatch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	c, err := websocket.Accept(w, r, &websocket.AcceptOptions{
-		InsecureSkipVerify: true,
-	})
+	c, err := websocket.Accept(w, r, s.acceptOptions())
 	if err != nil {
 		return
 	}
