@@ -73,3 +73,38 @@ func TestDeploy_FilesPresent(t *testing.T) {
 		"make build", "docker build", "systemctl",
 		"--require-tls", "--admin-addr", "/metrics")
 }
+
+// TestDeploy_CIWiring — the CI/nightly workflows + the frozen path-diff gate
+// exist and wire the real make targets/scripts (DoD #20). YAML is checked by
+// content (no YAML dep); a live GitHub run is operator-side.
+func TestDeploy_CIWiring(t *testing.T) {
+	root := repoRoot(t)
+
+	for _, rel := range []string{
+		".github/workflows/ci.yml", ".github/workflows/nightly.yml",
+		"scripts/check-frozen-paths.sh",
+	} {
+		if _, err := os.Stat(filepath.Join(root, rel)); err != nil {
+			t.Errorf("missing CI artifact %s: %v", rel, err)
+		}
+	}
+
+	ci := readRepoFile(t, root, ".github/workflows/ci.yml")
+	mustContain(t, ".github/workflows/ci.yml", ci,
+		"check-frozen-paths.sh", "frozen-change-approved",
+		"make test-race", "make test-testhooks", "make test-load",
+		"test:coverage", "test:e2e", "-tags embed")
+
+	nightly := readRepoFile(t, root, ".github/workflows/nightly.yml")
+	mustContain(t, ".github/workflows/nightly.yml", nightly,
+		"make perf-nightly", "--soak")
+
+	// The path-diff gate must actually guard the frozen paths + itself.
+	gate := readRepoFile(t, root, "scripts/check-frozen-paths.sh")
+	mustContain(t, "scripts/check-frozen-paths.sh", gate,
+		"internal/sim/", "internal/proto/", "sha256", "check-frozen")
+
+	// The Makefile must define the targets the workflows invoke.
+	mk := readRepoFile(t, root, "Makefile")
+	mustContain(t, "Makefile", mk, "test-load:", "perf-nightly:")
+}
