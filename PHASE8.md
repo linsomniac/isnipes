@@ -46,28 +46,52 @@ forward from Phase 7 are:
 - **`schemaChecksum` stays `0x42607394`.** `internal/proto/checksum.go`
   and the client mirrors are not edited. No frame is added or changed;
   the load harness speaks the existing wire protocol.
-- **The Phase 7 frozen-file guard stays green.** `scripts/check-frozen.sh`
-  must still pass over its manifest (`internal/sim/**`,
-  `internal/proto/checksum.go`, `web/src/{proto,sim,prediction,interp,
-  netClient}.ts`). Phase 8 edits none of those files.
+- **The frozen-file guard stays green and is *strengthened*.** Today
+  `scripts/check-frozen.sh` locks `internal/sim/**`,
+  `internal/proto/checksum.go`, and `web/src/{proto,sim,prediction,
+  interp,netClient}.ts` — but **not** the wire encoders
+  `internal/proto/frame.go` / `internal/proto/messages.go`, so the
+  current manifest does not fully back the "no wire change" claim. Phase
+  8 expands the manifest to cover **all** of `internal/proto/*.go` and
+  adds a CI path-diff gate (§14) over those paths *plus the guard
+  script and manifest themselves*, so the freeze cannot be silently
+  re-seeded without showing up in review. Phase 8 edits none of the
+  frozen *source* files; it only edits `scripts/check-frozen.sh` and
+  re-seeds `scripts/frozen.sha256` to widen coverage (both intentional,
+  reviewed, and out of the frozen set).
 
 Phase 8 ships:
 
 - **Observability** (`internal/observ`) — a dependency-free metrics
   registry: a lock-free tick-duration histogram (atomic fixed buckets)
-  with a `P99()` query, counters (active matches, joined players, bytes
-  in/out, snapshot drops, ticks over budget), and a `/metrics` handler
-  emitting Prometheus **text exposition** format. No new module
-  dependency (open question §19.1).
-- **pprof, actually mounted** (`cmd/isnipes`) — `--enable-pprof`
-  currently sets a discarded local (`_ = enablePprof`); Phase 8 mounts
-  `net/http/pprof` under `/debug/pprof/*` **only** when the flag is set
-  (off by default, so the prod surface stays minimal).
-- **Tick-budget instrumentation** (`internal/match`) — the actor times
-  each `m.tick()` via the injectable `clock()` and records the duration
-  into an `observ`-supplied sampler (nil-safe; zero behaviour change
-  when unset). It also increments the "tick over budget" counter when a
-  tick exceeds `tickInterval` (33 ms), matching SPEC §11.
+  used for `/metrics` reporting, counters (active matches, joined
+  players, bytes in/out, snapshot drops, ticks over budget), and a
+  `/metrics` handler emitting Prometheus **text exposition** format. No
+  new module dependency (open question §19.1). **`/metrics` and pprof
+  are served on a separate admin listener** (`--admin-addr`, default
+  `127.0.0.1:6060`, settable to empty to disable), **never** on the
+  public `--addr` listener — so traffic/runtime internals are not
+  exposed to the internet (§6.3).
+- **pprof, actually mounted, admin-only** (`cmd/isnipes`) —
+  `--enable-pprof` currently sets a discarded local
+  (`_ = enablePprof`); Phase 8 mounts `net/http/pprof` under
+  `/debug/pprof/*` on the **admin** listener **only** when the flag is
+  set (off by default). The public listener never serves pprof or
+  `/metrics`; the nginx example additionally denies both paths (§12.2)
+  as defence in depth.
+- **Tick-budget instrumentation + over-budget catch-up**
+  (`internal/match`) — the actor times each `m.tick()` via the
+  injectable `clock()` and records the duration into an `observ`-supplied
+  sampler (nil-safe; zero behaviour change when unset). It also
+  implements the canonical SPEC §11 over-budget rule, which is currently
+  **unimplemented** (`match.go:752` broadcasts every 2nd tick
+  unconditionally): when a tick exceeds `tickInterval` (33 ms), the
+  actor **suppresses the next scheduled snapshot** (15 Hz → one skipped
+  beat to catch up; never accumulated) and increments
+  `isnipes_snapshot_drops_total` and the over-budget counter. The drop
+  counter counts *snapshots suppressed by the over-budget rule* (not AOI
+  trimming). This is an actor-only change — no `internal/sim` or wire
+  edit. See §6.5.
 - **Load harness** (`internal/loadtest`) — an in-process synthetic
   client (reusing the lobby→match handshake pattern from
   `cmd/isnipes/e2e_test.go`) and a driver that spawns N clients across M
@@ -92,6 +116,18 @@ Phase 8 ships:
   `make build` runs the web build then `go build -tags embed`, baking
   the real client in. A default-asset test asserts the embed build
   serves the real bundle, not the placeholder.
+- **Transport security** (`cmd/isnipes`, `internal/net`) — two changes
+  SPEC §12 (open-question 5) requires for a production-facing v1:
+  (a) **direct TLS** via `--require-tls`, `--tls-cert`, `--tls-key`
+  (the binary can terminate TLS itself, the documented alternative to
+  fronting with nginx); and (b) a **WebSocket origin policy** replacing
+  today's blanket `InsecureSkipVerify: true`
+  (`internal/net/server.go:83,149`, which accepts any `Origin` and is a
+  cross-site-WebSocket-hijack risk). Default becomes same-origin
+  enforcement (nhooyr's default when `InsecureSkipVerify=false` and
+  `OriginPatterns` is empty), with `--allowed-origins` for extra hosts
+  and `--insecure-origin` as an explicit dev override. Neither file is
+  frozen; no frame changes, so `schemaChecksum` is untouched.
 - **Deployment artifacts** — `Dockerfile` (multi-stage: node build → go
   `-tags embed` build → `FROM scratch`), `.dockerignore`,
   `deploy/isnipes.service` (hardened systemd unit),
@@ -194,6 +230,13 @@ internal/loadtest/
 scripts/
 └── load_test.go      # NEW — //go:build ignore — package main CLI over loadtest (§7.5)
 
+testdata/
+└── perf_baseline.json # NEW — committed nightly regression baseline (§9)
+
+cmd/isnipes/testdata/
+├── tls_cert.pem      # NEW — self-signed cert for TestMain_DirectTLS (§16.3)
+└── tls_key.pem       # NEW
+
 deploy/
 ├── README.md         # NEW — build / docker / systemd / nginx / flags / endpoints (§13)
 ├── isnipes.service   # NEW — hardened systemd unit (§12.1)
@@ -211,38 +254,54 @@ Existing files modified by Phase 8:
 
 ```
 cmd/isnipes/
-├── main.go           # mount net/http/pprof when --enable-pprof; mount observ
-│                     # /metrics; move //go:embed behind a build tag (embed_on.go /
-│                     # embed_off.go split); wire the match tick sampler into the
-│                     # registry config.
+├── main.go           # add the admin listener (--admin-addr) serving observ
+│                     # /metrics + (when --enable-pprof) net/http/pprof — NOT on
+│                     # the public --addr mux; add --require-tls/--tls-cert/
+│                     # --tls-key + --allowed-origins/--insecure-origin; move
+│                     # //go:embed behind a build tag (embed_on.go / embed_off.go
+│                     # split); wire the match tick sampler + over-budget hook into
+│                     # the registry config.
 ├── embed_on.go       # NEW — //go:build embed — //go:embed all:dist + real staticFS
 ├── embed_off.go      # NEW — //go:build !embed — placeholder notice FS
 └── default_asset_test.go # NEW — //go:build embed — GET / serves the real bundle (§10)
 
 internal/match/
 ├── match.go          # time m.tick() via clock(); record into observ sampler
-│                     # (nil-safe); count ticks-over-budget. No sim edit.
-└── match_test.go     # extend — TestMatch_TickDurationRecorded
+│                     # (nil-safe); over-budget rule suppresses next snapshot +
+│                     # increments drop/over-budget counters; actor updates the
+│                     # joined-players gauge transactionally on join/leave/drop.
+│                     # No sim edit.
+├── registry.go       # add StopAll(ctx): signal every match to end cleanly and
+│                     # wait for the map to drain (deterministic teardown for the
+│                     # harness + graceful shutdown); active-matches gauge updated
+│                     # on Create/RemoveEnded.
+└── match_test.go     # extend — TestMatch_TickDurationRecorded,
+                      # TestMatch_OverBudgetSkipsNextSnapshot, TestRegistry_StopAll
 
 internal/net/
-└── server.go         # (only if needed) expose byte counters to observ via an
-                      # optional hook; no behaviour change when the hook is nil.
+└── server.go         # MANDATORY: replace InsecureSkipVerify:true with the origin
+                      # policy (§ transport security); count on-the-wire frame bytes
+                      # in/out into the observ registry (the ONLY producer of the
+                      # production bytes series). Additive; no frame format change.
 
 Makefile              # build runs web build then go build -tags embed; add
                       # test-load, perf-nightly, docker targets.
 web/package.json      # (build script already emits dist/app.js+index.html) — no change
                       # expected; documented here as the embed source of truth.
 .gitignore            # ignore /web/dist/ build output and any load-report artifacts.
+scripts/check-frozen.sh + scripts/frozen.sha256  # widen the manifest to all
+                      # internal/proto/*.go and re-seed (§1 invariant, §14).
 ```
 
-`internal/sim/**`, `internal/proto/**`, `web/src/proto.ts`,
-`web/src/sim.ts`, `web/src/prediction.ts`, `web/src/interp.ts`, and
-`web/src/netClient.ts` are **NOT** edited (frozen guard, DoD #2). The
-`internal/net/server.go` change is **optional and additive** — byte
-accounting can instead live in the harness's own counting `io` wrapper
-around the client WS, avoiding any server edit; that is the **default**
-(§7.1), and the server hook is only added if in-process byte counts
-prove insufficient. Either way no frame format changes.
+`internal/sim/**`, `internal/proto/**` (the encoders themselves),
+`web/src/proto.ts`, `web/src/sim.ts`, `web/src/prediction.ts`,
+`web/src/interp.ts`, and `web/src/netClient.ts` are **NOT** edited
+(frozen guard, DoD #2). Byte accounting for the **production** `/metrics`
+series is owned by `internal/net` (the server is the only place that
+sees real per-connection traffic); the **load-harness** additionally
+counts its own client-side WS bytes for the load `Report` (§7.1) — these
+are two distinct producers for two distinct consumers, not a substitute
+for each other. No frame format changes either way.
 
 ---
 
@@ -265,6 +324,14 @@ func (h *Histogram) Reset()
 // match package does not import the whole registry. nil is a valid
 // no-op sampler (the actor checks for nil before calling).
 type Sampler interface{ Observe(d time.Duration) }
+
+// RecordingSampler keeps every observed duration. The smoke gate injects
+// this (not the bucketed Histogram) so its P99 assertion is computed
+// from EXACT samples, not a bucket-interpolated estimate (§6.1, §8).
+type RecordingSampler struct{ /* mutex-guarded []time.Duration */ }
+func (s *RecordingSampler) Observe(d time.Duration)
+func (s *RecordingSampler) Quantile(q float64) time.Duration // exact, from sorted copy
+func (s *RecordingSampler) Len() int
 
 // Registry is the process-wide metrics surface scraped by /metrics.
 type Registry struct{ /* tick histogram + atomic counters */ }
@@ -294,7 +361,7 @@ type Report struct {
     Matches, Clients          int
     Duration                  time.Duration
     LatencyP50, LatencyP99    time.Duration // input.clientTick → echoing snapshot
-    TickP50, TickP99          time.Duration // server tick budget (from observ)
+    TickP50, TickP99          time.Duration // EXACT, from the RecordingSampler (§6.1)
     TicksOverBudget           uint64
     BytesInPerClientPerSec    float64       // KB/s
     BytesOutPerClientPerSec   float64       // KB/s
@@ -317,14 +384,35 @@ func RunStandalone(cfg Config) (Report, bool)
 ```
 
 ```go
-// internal/match — RegistryConfig / Config gains an optional sampler.
-// When nil, the actor records nothing (current behaviour).
+// internal/match — RegistryConfig gains optional, nil-safe hooks. When
+// all are nil the actor behaves exactly as today.
 type RegistryConfig struct {
     MaxConcurrentMatches int
-    TickSampler          observ.Sampler // NEW, optional
-    OnTickOverBudget     func()         // NEW, optional
+    TickSampler          observ.Sampler // NEW, optional — Observe(tickDuration)
+    OnTickOverBudget     func()         // NEW, optional — over-budget counter bump
+    OnSnapshotDrop       func()         // NEW, optional — over-budget snapshot skip
+    OnJoinedDelta        func(delta int) // NEW, optional — actor-owned joined gauge
 }
+
+// StopAll signals every live match to end cleanly (a ctlShutdown control
+// message → graceful MatchOver, NOT reason=SERVER_ERROR, so it is not
+// counted as a MatchAbort) and waits until the registry map drains or
+// ctx is done. Used by graceful shutdown AND the load-harness teardown
+// so the goroutine-leak check samples after a deterministic drain
+// (finding: Registry.Close does not stop matches; DC-grace actors
+// otherwise linger).
+func (r *Registry) StopAll(ctx context.Context) error
+// Len reports the number of live matches (drives the active-matches
+// gauge and the harness drain wait).
+func (r *Registry) Len() int
 ```
+
+The joined-players and active-matches gauges are updated **from inside
+the owning goroutine** — the actor calls `OnJoinedDelta` on each
+admit/leave/drop, and the registry adjusts active-matches on
+`Create`/`RemoveEnded`. Nothing polls `Match.JoinedCount()` from outside
+the actor (that read is explicitly unsafe on a live match,
+`match.go:390`).
 
 `internal/match` importing `internal/observ` only for the one-method
 `Sampler` interface keeps the dependency direction clean
@@ -338,16 +426,23 @@ the HTTP/metrics surface.
 
 ## 6. Observability (`internal/observ`)
 
-### 6.1 Tick histogram
+### 6.1 Tick histogram (observability) vs exact gate samples
 
-Fixed exponential-ish buckets in microseconds covering the relevant
-range for a 33 ms budget, e.g. upper bounds `{100µs, 250µs, 500µs, 1ms,
-2ms, 5ms, 10ms, 20ms, 33ms, 50ms, 100ms, +Inf}`. `Observe` finds the
-bucket and `atomic.AddUint64`s its count and the running total/count;
-no lock. `Quantile(q)` walks cumulative counts to the target bucket and
-linearly interpolates within it (a standard histogram-quantile
-estimate; documented as an estimate, sufficient for a < 10 ms / < 5 ms
-budget assertion against buckets that bracket those thresholds). DoD #7.
+Two distinct surfaces, deliberately separated:
+
+- **`Histogram`** — fixed buckets in microseconds, e.g. upper bounds
+  `{100µs, 250µs, 500µs, 1ms, 2ms, 5ms, 10ms, 20ms, 33ms, 50ms, 100ms,
+  +Inf}`. `Observe` finds the bucket and `atomic.AddUint64`s its count
+  plus the running sum/count; no lock. `Quantile(q)` walks cumulative
+  counts and interpolates within the target bucket. This is the
+  `/metrics` reporting surface and is explicitly **an estimate** — it is
+  **not** used to decide a pass/fail gate.
+- **`RecordingSampler`** — keeps every sample; `Quantile` sorts a copy
+  and returns the **exact** rank. The smoke gate (§8) injects this as
+  the match `TickSampler` and asserts `report.TickP99 < 10 ms` from
+  exact samples, so a true P99 of exactly 10 ms cannot be smeared below
+  the threshold by bucket interpolation (the prior wording incorrectly
+  claimed the histogram alone could verify a strict bound). DoD #7.
 
 ### 6.2 Counters and `/metrics`
 
@@ -355,18 +450,33 @@ Atomic counters: `isnipes_ticks_total`, `isnipes_ticks_over_budget_total`,
 `isnipes_bytes_in_total`, `isnipes_bytes_out_total`,
 `isnipes_snapshot_drops_total`; gauges `isnipes_active_matches`,
 `isnipes_joined_players`; histogram `isnipes_tick_seconds` exported as
-Prometheus `_bucket`/`_sum`/`_count` lines. `WriteProm` emits valid
-text exposition (HELP/TYPE comments, sorted, `\n`-terminated).
-`Handler()` sets `Content-Type:
-text/plain; version=0.0.4; charset=utf-8`. DoD #8.
+Prometheus `_bucket`/`_sum`/`_count` lines. **Every series has a real
+producer** (finding: do not promise series nothing increments):
+- `bytes_in/out_total` — incremented by `internal/net`'s frame
+  read/write path (the only code that sees real connection traffic);
+- `snapshot_drops_total` — incremented by the actor's over-budget rule
+  (§6.5);
+- `ticks_total` / `ticks_over_budget_total` / `tick_seconds` — from the
+  actor tick wrapper (§6.4);
+- `active_matches` — adjusted by the registry on `Create`/`RemoveEnded`;
+- `joined_players` — adjusted by each actor via `OnJoinedDelta` on
+  admit/leave/drop (never polled from outside the actor).
 
-### 6.3 pprof mount (gated)
+`WriteProm` emits valid text exposition (HELP/TYPE comments, sorted,
+`\n`-terminated). `Handler()` sets
+`Content-Type: text/plain; version=0.0.4; charset=utf-8`. DoD #8.
 
-`cmd/isnipes/main.go` registers the stdlib `net/http/pprof` handlers on
-the existing mux **only** when `--enable-pprof` is true. Default off:
-production exposes `/healthz`, `/version`, `/metrics`, `/ws/*`, and the
-static client — *not* pprof. `/metrics` is always on (scrape target);
-if an operator wants it private they front it with nginx (§12.2). DoD #9.
+### 6.3 Admin listener for `/metrics` + pprof (not public)
+
+Metrics and profiling are **operational** surfaces and must not sit on
+the internet-facing listener. `cmd/isnipes/main.go` starts a **second**
+HTTP server on `--admin-addr` (default `127.0.0.1:6060`; empty disables
+it). The admin mux serves `/metrics` always and the stdlib
+`net/http/pprof` handlers **only** when `--enable-pprof` is set. The
+public `--addr` mux serves exactly `/`, `/healthz`, `/version`, and
+`/ws/*` — never `/metrics` or `/debug/pprof`. Defence in depth: the
+nginx example (§12.2) also denies both paths on the proxied path. Both
+servers share graceful shutdown. DoD #9.
 
 ### 6.4 Match tick instrumentation
 
@@ -375,23 +485,51 @@ call:
 
 ```
 start := m.clock()
-m.tick()
+m.tick()                      // §6.5 decides whether this tick's snapshot is skipped
 d := m.clock().Sub(start)
 if s := m.tickSampler; s != nil { s.Observe(d) }
-if d > tickInterval && m.onTickOverBudget != nil { m.onTickOverBudget() }
+if d > tickInterval {
+    m.overBudget = true       // consumed by the NEXT scheduled snapshot beat (§6.5)
+    if m.onTickOverBudget != nil { m.onTickOverBudget() }
+}
 ```
 
-Both hooks are nil in every existing test and in any boot that does not
+All hooks are nil in every existing test and in any boot that does not
 pass them, so behaviour is unchanged and `internal/sim` is untouched.
-The registry sets `active_matches`/`joined_players` gauges by
-periodically reading `match.Registry` counts (a 1 Hz updater goroutine
-in `cmd/isnipes`, stopped on shutdown). DoD #10.
+DoD #10.
+
+### 6.5 Over-budget snapshot suppression (SPEC §11)
+
+SPEC §11 ("Sim tick over budget") requires: skip the next snapshot to
+catch up, never accumulate, emit a metric. This is currently
+**unimplemented** — `match.go:752` broadcasts on every
+`ServerTick % snapshotEveryTicks == 0` unconditionally. Phase 8 adds an
+actor-local one-shot flag:
+
+```
+if m.sim.ServerTick()%snapshotEveryTicks == 0 {
+    if m.overBudget {
+        m.overBudget = false          // consume; never accumulate
+        if m.onSnapshotDrop != nil { m.onSnapshotDrop() }  // drops_total++
+    } else {
+        m.broadcastSnapshot()
+    }
+}
+```
+
+So a single over-budget tick suppresses exactly the next scheduled
+snapshot beat (15 Hz → 7.5 Hz for one beat), then cadence resumes. The
+flag is one-shot, so a burst of over-budget ticks within one snapshot
+interval still skips only one beat. `isnipes_snapshot_drops_total`
+counts **these** suppressions only. This is actor-only state; no
+`internal/sim` and no wire change. Tested by
+`TestMatch_OverBudgetSkipsNextSnapshot` (§16.2). DoD #10a.
 
 ---
 
 ## 7. Load harness (`internal/loadtest`)
 
-### 7.1 Synthetic client
+### 7.1 Synthetic client + the bandwidth unit
 
 One synthetic client = one goroutine that: dials `/ws/lobby`, creates or
 joins a room to obtain `matchID` + `joinToken` (or the driver pre-creates
@@ -400,25 +538,48 @@ rooms and hands tokens out), dials `/ws/match/{id}`, sends `MatchJoin`
 sending `Input` frames (a deterministic walk pattern keyed off the
 client index so the sim does real work) and concurrently drains inbound
 frames. It records, per inbound `Snapshot`, the end-to-end latency as
-`now − sendTimeOf(snapshot.yourLastInputTick)` and tallies bytes via a
-counting wrapper around the WS read/write (so **no server edit** is
-needed for bandwidth). On any protocol/IO error it increments
-`ClientErrors` and exits cleanly. Reuses the exact frame helpers from
-`cmd/isnipes/e2e_test.go` (extracted/shared, not duplicated where
-practical).
+`now − sendTimeOf(snapshot.yourLastInputTick)`. On any protocol/IO error
+it increments `ClientErrors` and exits cleanly. Reuses the frame helpers
+from `cmd/isnipes/e2e_test.go` (extracted into the shared harness, not
+duplicated).
 
-### 7.2 Driver
+**Bandwidth unit (was ambiguous).** The `Report` bandwidth figures are
+**application WebSocket-message bytes** — the byte length of each binary
+WS message the client sends/receives (i.e. the isnipes frame: 8-byte
+header + payload), summed per client and divided by wall-clock seconds.
+This **excludes** WebSocket frame headers + client masking, the HTTP
+upgrade handshake, and any TLS/proxy overhead; that overhead is a small,
+bounded per-message constant (a few bytes) and is documented as
+out-of-scope for the threshold. SPEC §8's 12 KB/s / 8 KB/s targets are
+about *application snapshot bandwidth* (post-AOI), which this measures
+directly. The DoD (§20) names the unit explicitly so the gate is
+comparable. The same client-side tally drives only the load `Report`; it
+is **not** the source of the production `bytes_*_total` series (those are
+the server's, §6.2).
+
+### 7.2 Driver + deterministic teardown
 
 `Run(t, cfg, reg)`: boots `httptest.NewServer(srv.Handler())` with a
-`match.Registry` whose `RegistryConfig.TickSampler =
-reg.TickHistogram()` and `OnTickOverBudget = reg.IncTickOverBudget`,
-records `GoroutinesBefore`/`RSSStart`, spawns `Matches × ClientsEach`
-clients, runs for `Duration`, then signals stop, waits for all clients,
-tears down the server, calls `runtime.GC()` + a short settle, and
-records `GoroutinesAfter`/`RSSEnd`. It pulls `TickP50/TickP99` from the
-`observ` histogram and computes per-client KB/s from the byte tallies.
-`MatchAborts` is read from a registry counter / `MatchOver{reason =
-SERVER_ERROR}` observations.
+`match.Registry` whose `RegistryConfig.TickSampler` is an
+`observ.RecordingSampler` (exact P99, §6.1), `OnTickOverBudget`/
+`OnSnapshotDrop`/`OnJoinedDelta` wired to `reg`. It records
+`GoroutinesBefore`/`RSSStart`, spawns `Matches × ClientsEach` clients,
+runs for `Duration`, then:
+
+1. signals all clients to stop and **joins every client goroutine**;
+2. calls `registry.StopAll(ctx)` to end the test matches cleanly and
+   **waits until `registry.Len() == 0`** (so no actor / DC-grace timer
+   goroutine lingers — `Registry.Close` alone does *not* stop matches,
+   `registry.go:71`);
+3. shuts down the HTTP server and waits for its handler goroutines;
+4. `runtime.GC()` + a short settle, then records
+   `GoroutinesAfter`/`RSSEnd`.
+
+Because clean `StopAll` shutdown ends matches with a graceful reason
+(not `SERVER_ERROR`), it is **excluded** from `MatchAborts`;
+`MatchAborts` counts only `MatchOver{reason = SERVER_ERROR}` /
+panic-aborts observed *during* the run. `TickP50/TickP99` come from the
+exact `RecordingSampler`; per-client KB/s from the client byte tallies.
 
 ### 7.3 Report
 
@@ -439,10 +600,13 @@ the resident field by `os.Getpagesize()`; elsewhere return
 `go test ./...` (run via `go run scripts/load_test.go [flags]`). Flags:
 `--matches` (default 4), `--clients` (default 4), `--duration` (default
 60s), `--input-hz` (30), `--nightly` (sets 64 × 8, 60 s, regression
-print), `--soak` (sets `Soak`, default 24 h, `--rotate-every` 30 s).
-Calls `loadtest.RunStandalone`, prints the `Report`, exits non-zero only
-for `--nightly`/smoke-style hard failures (soak is report-only). DoD #18,
-#19.
+compare against `testdata/perf_baseline.json`), `--soak` (sets `Soak`,
+default 24 h, `--rotate-every` 30 s), `--baseline` (path, default
+`testdata/perf_baseline.json`), `--update-baseline` (re-seed the
+baseline and exit 0). Calls `loadtest.RunStandalone`, prints the
+`Report`, and exits **non-zero** when `--nightly`/`--soak` detects a
+flagged regression (§9) so the scheduled job goes red; a plain run with
+no thresholds is report-only and exits 0. DoD #18, #19.
 
 ---
 
@@ -453,11 +617,15 @@ for `--nightly`/smoke-style hard failures (soak is report-only). DoD #18,
 - `TestLoad_Smoke` runs `Run(t, Config{Matches:4, ClientsEach:4,
   Duration:60s, InputHz:30}, reg)` and asserts:
   - `ClientErrors == 0` and `MatchAborts == 0` (DoD #3),
-  - `report.TickP99 < 10 * time.Millisecond` (DoD #4),
-  - `!report.GoroutineLeaked(allowedSlack)` (DoD #5; `allowedSlack`
-    small, e.g. 4, to tolerate runtime/httptest residue),
+  - `report.TickP99 < 10 * time.Millisecond`, computed from the **exact**
+    `RecordingSampler`, not the bucketed histogram (DoD #4),
+  - `!report.GoroutineLeaked(allowedSlack)` (DoD #5). Because §7.2 drains
+    all matches via `StopAll` before sampling, the residual is ~0, so
+    `allowedSlack` is *small* (e.g. 2, for genuine runtime/httptest
+    residue) and does **not** mask lingering match actors,
   - `report.BytesInPerClientPerSec ≤ 12` and
-    `report.BytesOutPerClientPerSec ≤ 12` KB/s (DoD #6).
+    `report.BytesOutPerClientPerSec ≤ 12` (application WS-message KB/s,
+    §7.1) (DoD #6).
 - Under `go test -short` the duration drops to ~5 s for a fast local
   sanity pass; CI runs it **without** `-short` (full 60 s) via `make
   test-load`. The 60 s gate lives in its own CI step, not in
@@ -471,14 +639,27 @@ for `--nightly`/smoke-style hard failures (soak is report-only). DoD #18,
 ## 9. Nightly / soak (deferred-to-operator, `make perf-nightly`)
 
 - **Larger load** — 64 matches × 8 clients (512 players), 60 s on a
-  4-core box; sustain 30 Hz; **regression-style**: print `TickP99`,
-  flag if it worsened versus a committed/last baseline, but do **not**
-  hard-fail (SPEC §8: "aspirational … enforced as a *regression* test").
-- **Bandwidth target** — ≤ 8 KB/s per client at that scale (post-AOI);
-  report-only.
-- **Soak (24 h)** — `--soak`, rotating clients; assert (report-only)
-  `/debug/pprof/goroutine` flat (goroutine count stable) and RSS growth
-  < 5 % over the window.
+  4-core box; sustain 30 Hz; **regression-style**, defined concretely:
+  - **Baseline format** — a committed `testdata/perf_baseline.json`
+    `{tick_p99_us, bytes_in_kbps, bytes_out_kbps, recorded_at, host}`.
+    Absent/empty file → the run *writes* a baseline and exits 0 (first
+    run seeds it).
+  - **Comparison** — flag (print a `REGRESSION:` line) if
+    `TickP99 > baseline.tick_p99_us × 1.20` (20 % tolerance to absorb
+    runner noise) or bandwidth exceeds its target below.
+  - **Failure semantics** — `--nightly` exits **non-zero** on a flagged
+    regression so the scheduled CI job goes red; it never hard-fails a
+    PR (it is not in the PR gate). `--update-baseline` re-seeds the file.
+- **Bandwidth target** — ≤ 8 KB/s per client (application WS-message
+  bytes, §7.1) at that scale (post-AOI); compared the same way.
+- **Soak (24 h)** — `--soak`, rotating clients. The harness samples
+  **in-process** every `--rotate-every` (default 30 s):
+  `runtime.NumGoroutine()` and `rssBytes()` (§7.4) — **no pprof scrape
+  is required** (pprof would only matter for a *remote* probe; in-process
+  the runtime values are authoritative). It reports goroutine-count
+  drift and `RSS_end / RSS_start − 1`; flags if goroutines trend upward
+  (not flat) or RSS grows > 5 % over the window. Exits non-zero on a
+  flagged soak regression.
 
 `make perf-nightly` = `go run scripts/load_test.go --nightly` (and a
 documented `--soak` invocation). These are unsuitable as PR gates
@@ -502,12 +683,15 @@ populated `dist/`:
 - `main.go`: `staticFS = os.DirFS(*webDist)` if `--web-dist` set, else
   `embeddedStatic()`. `--web-dist` still wins (the e2e harness path is
   unchanged).
-- `Makefile` `build`: `npm -C web ci || npm -C web install` →
-  `npm -C web run build` → `rm -rf cmd/isnipes/dist/* (keep .gitkeep)` →
+- `Makefile` `build`: `npm -C web ci` (lockfile-pinned, **no**
+  `|| npm install` fallback — a fallback would silently drift from the
+  lockfile) → `npm -C web run build` → `find cmd/isnipes/dist -mindepth
+  1 ! -name .gitkeep -delete` (clear stale chunks, keep `.gitkeep`) →
   `cp -r web/dist/* cmd/isnipes/dist/` → `go build -tags embed -o
   isnipes ./cmd/isnipes`. The committed `cmd/isnipes/dist/` keeps only
   `.gitkeep` (build artifacts are git-ignored; the placeholder
-  `index.html` is removed).
+  `index.html` is removed). The clear-before-copy step prevents a
+  renamed/old bundle from staying embedded.
 - `cmd/isnipes/default_asset_test.go` (`//go:build embed`): builds the
   static handler from the embedded FS and asserts `GET /` returns the
   real bundle — body references `app.js` and does **not** contain the
@@ -527,11 +711,12 @@ the `embed_off` path.
 ## 11. Dockerfile (multi-stage, `FROM scratch`)
 
 ```
+# Pin builder images by digest in the real file (tag shown for clarity).
 # Stage 1: web build (node)
 FROM node:20-alpine AS web
 WORKDIR /web
 COPY web/package.json web/package-lock.json ./
-RUN npm ci
+RUN npm ci                   # lockfile-pinned; never npm install
 COPY web/ ./
 RUN npm run build            # → /web/dist/{app.js,index.html}
 
@@ -541,6 +726,9 @@ WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download
 COPY . .
+# Clear any dist the build context carried in, then take ONLY the freshly
+# built web output (no stale/renamed chunks survive into the embed).
+RUN rm -rf cmd/isnipes/dist && mkdir -p cmd/isnipes/dist
 COPY --from=web /web/dist/ ./cmd/isnipes/dist/
 RUN CGO_ENABLED=0 GOOS=linux go build -tags embed -trimpath \
       -ldflags "-s -w" -o /isnipes ./cmd/isnipes
@@ -548,21 +736,31 @@ RUN CGO_ENABLED=0 GOOS=linux go build -tags embed -trimpath \
 # Stage 3: minimal final
 FROM scratch
 COPY --from=build /isnipes /isnipes
-EXPOSE 8080
+EXPOSE 8080                     # public listener only; --admin-addr stays loopback
 USER 65534:65534                # nobody; scratch has no /etc/passwd, numeric UID
 ENTRYPOINT ["/isnipes"]
-CMD ["--addr=:8080"]
+# Public listener on :8080; metrics/pprof admin listener bound to loopback
+# (unreachable from outside the container unless explicitly published).
+CMD ["--addr=:8080", "--admin-addr=127.0.0.1:6060"]
 ```
 
 - `FROM scratch` + `CGO_ENABLED=0` static binary → image ≈ the binary
   size (target ~10 MB; DoD allows ≤ 15 MB to absorb toolchain drift).
-- No shell/TLS-cert layer: TLS is terminated by nginx (§12.2) or the
-  binary's own `--require-tls` if later added; for HTTPS *from the
-  container directly* an operator must add a CA bundle layer (documented
-  in §13 as a known limitation of `scratch`).
-- `.dockerignore` excludes `node_modules`, `web/dist`, `.git`,
-  `*_test.go` is **not** excluded (build only compiles non-test), test
-  caches, `.codex`, `.phase-loop-notes.md`.
+- **Builder images pinned by digest** (`node:20-alpine@sha256:…`,
+  `golang:1.26-alpine@sha256:…`) in the committed file for reproducible
+  builds; tags are shown above only for readability.
+- Only `:8080` is `EXPOSE`d. The admin listener (`/metrics`, pprof) is
+  loopback and never published, so metrics/profiling are not reachable
+  from outside the container by default.
+- No shell/TLS-cert layer. TLS is terminated by nginx (§12.2) **or** the
+  binary itself via `--require-tls --tls-cert --tls-key` (§ transport
+  security). For HTTPS *from the container directly* an operator must add
+  a CA bundle layer or use the distroless base (§19.6); documented in §13
+  as a known `scratch` limitation.
+- `.dockerignore` excludes `node_modules`, `web/dist`, `cmd/isnipes/dist`
+  (built fresh in-stage), `.git`, test caches, `.codex`,
+  `.phase-loop-notes.md`. `*_test.go` is **not** excluded (the go build
+  ignores test files anyway).
 
 DoD #14 (Dockerfile present + multi-stage + scratch; build/run/size
 check is operator/CI — requires a Docker daemon, deferred-to-operator
@@ -579,9 +777,10 @@ Hardened unit: `DynamicUser=yes` (or a dedicated `isnipes` user),
 `PrivateTmp=yes`, `RestrictAddressFamilies=AF_INET AF_INET6`,
 `CapabilityBoundingSet=` (empty), `AmbientCapabilities=` (none — binds
 :8080, an unprivileged port), `Restart=on-failure`,
-`ExecStart=/usr/local/bin/isnipes --addr=127.0.0.1:8080` (loopback;
-nginx fronts it). Documented `[Install] WantedBy=multi-user.target`.
-DoD #15.
+`ExecStart=/usr/local/bin/isnipes --addr=127.0.0.1:8080
+--admin-addr=127.0.0.1:6060` (both loopback; nginx fronts the public
+one, the admin/metrics surface stays host-local). Documented `[Install]
+WantedBy=multi-user.target`. DoD #15.
 
 ### 12.2 `deploy/nginx.conf`
 
@@ -589,9 +788,13 @@ DoD #15.
 placeholders), `location / { proxy_pass http://127.0.0.1:8080; }` with
 the WebSocket upgrade dance (`proxy_http_version 1.1`, `Upgrade` /
 `Connection` headers, `proxy_read_timeout` ≥ the 5 s idle ping window
-with margin, e.g. 60 s), and a `location /metrics { allow 127.0.0.1;
-deny all; }` example so the scrape surface is not public. A `:80 → :443`
-redirect server block. DoD #16.
+with margin, e.g. 60 s). Since the public listener never serves them,
+the admin paths are already unreachable through the proxy; as defence in
+depth the example **also** `return 404`s `location = /metrics` and
+`location /debug/pprof` so an operator who accidentally points
+`location /` at the admin port still does not leak them. A `:80 → :443`
+redirect server block. The metrics scrape is expected to hit the admin
+listener (`127.0.0.1:6060`) directly, not through nginx. DoD #16.
 
 ---
 
@@ -600,70 +803,129 @@ redirect server block. DoD #16.
 Documents: `make build` (single static binary), `docker build` /
 `docker run -p 8080:8080`, the systemd install (copy binary to
 `/usr/local/bin`, unit to `/etc/systemd/system`, `daemon-reload`,
-`enable --now`), nginx TLS termination, the full flag list (`--addr`,
-`--max-matches`, `--motd`, `--log-level`, `--enable-pprof`,
-`--web-dist`, `--version`), the served endpoints (`/`, `/healthz`,
-`/version`, `/metrics`, `/ws/lobby`, `/ws/match/{id}`,
-`/debug/pprof/*` when enabled), the `scratch`-image HTTPS-from-container
-caveat, and how to read `/metrics` (key series + the < 10 ms / < 5 ms
-tick budgets). DoD #17.
+`enable --now`), and the full flag list:
+
+- `--addr` (public HTTP/WS listener, default `:8080`),
+- `--admin-addr` (metrics + pprof listener, default `127.0.0.1:6060`,
+  empty disables),
+- `--enable-pprof` (mount pprof on the admin listener; off by default),
+- `--require-tls` / `--tls-cert` / `--tls-key` (terminate TLS in the
+  binary — the documented alternative to nginx, SPEC §12 OQ5),
+- `--allowed-origins` (comma-separated extra WS origins) /
+  `--insecure-origin` (dev-only: accept any `Origin`; **never** in prod),
+- `--max-matches`, `--motd`, `--log-level`, `--web-dist`, `--version`.
+
+It splits the endpoints by listener: **public** (`/`, `/healthz`,
+`/version`, `/ws/lobby`, `/ws/match/{id}`) vs **admin** (`/metrics`
+always; `/debug/pprof/*` when `--enable-pprof`). It covers **two TLS
+paths** — nginx termination (§12.2) and direct `--require-tls` — and
+the **WS origin policy** (same-origin by default; widen with
+`--allowed-origins`; `--insecure-origin` is dev-only and a CSWSH risk in
+prod). It notes the `scratch`-image no-CA-bundle caveat (use distroless
+or add certs for direct outbound HTTPS) and how to read `/metrics` (key
+series + the < 10 ms / < 5 ms tick budgets). DoD #17.
 
 ---
 
 ## 14. CI wiring (`.github/workflows/`)
 
-- `ci.yml` (on push / PR): `go vet ./...`; `make test-race` (includes
-  the frozen guard via its prereq, DoD #2); `make test-testhooks`;
-  `npm -C web ci` + `npm -C web run test:coverage`; `npm -C web run
-  test:e2e` (Playwright, Chromium); `make test-load`. Go matrix may
-  include linux/amd64 + linux/arm64 for the sim determinism cross-check
-  (SPEC §12) — at minimum amd64.
-- `nightly.yml` (scheduled `cron`): `make perf-nightly`; the strict
-  cross-browser golden job deferred from P7 §20 may also live here.
+- `ci.yml` (on push / PR), in order:
+  1. **Frozen path-diff gate** — `git diff --name-only
+     ${{base}}...HEAD` must not touch `internal/sim/**`,
+     `internal/proto/**`, `web/src/{proto,sim,prediction,interp,
+     netClient}.ts`, **or** `scripts/check-frozen.sh` /
+     `scripts/frozen.sha256`. Touching any of those fails CI unless a
+     `frozen-change-approved` label/commit-trailer is present. This is
+     the *mechanical* backstop the sha-manifest alone cannot provide
+     (the manifest can be re-seeded; a path-diff over the script +
+     manifest themselves cannot be silently bypassed). The
+     `make check-frozen` sha check still runs as a second line of
+     defence.
+  2. `go vet ./...`; `make test-race` (its prereq runs `make
+     check-frozen`, DoD #2); `make test-testhooks`.
+  3. `npm -C web ci` + `npm -C web run test:coverage`; `npm -C web run
+     test:e2e` (Playwright, Chromium).
+  4. **Embed build + embed-tag tests** — `make build` (populates
+     `cmd/isnipes/dist`) then `go test -tags embed ./cmd/isnipes/...`
+     (runs `TestE2E_EmbeddedClientServed`, DoD #13).
+  5. `make test-load` (the 60 s smoke gate, its own step).
+  - Go matrix may include linux/amd64 + linux/arm64 for the sim
+    determinism cross-check (SPEC §12) — at minimum amd64.
+- `nightly.yml` (scheduled `cron`): `make perf-nightly` (512-player +
+  baseline-regression, §9); a `--soak` job; the strict cross-browser
+  golden job deferred from P7 §20 may also live here.
 - The deliverable is **valid, correctly-wired YAML** referencing the
   real `make` targets and scripts; whether a GitHub runner executes it
-  is operator-side. DoD #20 verifies the file parses and names the
-  targets.
+  is operator-side. DoD #20 verifies the files parse and name the
+  targets + the frozen path-diff gate.
 
 ---
 
 ## 15. Concurrency rules
 
-- The tick histogram write side is single-goroutine **per match**
-  (`Run`), but multiple match actors `Observe` the *same* shared
-  histogram concurrently → bucket increments are `atomic`. Read side
-  (`/metrics`, harness) snapshots atomically; an in-flight increment may
-  or may not be visible, which is fine for a percentile estimate.
-- The 1 Hz gauge updater in `cmd/isnipes` reads `match.Registry` counts
-  with the registry's existing synchronization; it is a separate
-  goroutine stopped on shutdown (no leak — joined before exit).
-- The load harness owns its clients' goroutines and joins all of them
-  before reading `GoroutinesAfter`, so the leak check measures real
-  residue, not in-flight teardown.
-- pprof handlers are stdlib; mounting them adds no new concurrency.
+- The tick histogram / counter write side is single-goroutine **per
+  match** (`Run`), but multiple match actors update the *same* shared
+  `observ.Registry` concurrently → all counter/gauge/bucket mutations
+  are `atomic`. Read side (`/metrics`) snapshots atomically; an
+  in-flight increment may or may not be visible, which is fine for a
+  scrape.
+- Gauges are updated **by their owning goroutine**, never polled from
+  outside: `active_matches` from the registry's locked
+  `Create`/`RemoveEnded`; `joined_players` from each actor via
+  `OnJoinedDelta` on admit/leave/drop. Nothing reads a live match's
+  slot map externally (`Match.JoinedCount` is unsafe on a live match,
+  `match.go:390`).
+- `Registry.StopAll` posts `ctlShutdown` to each actor's inbox (the
+  actor's own goroutine performs the end) and waits on each `done`
+  channel + the registry drain; it does not touch slot state directly.
+- The load harness owns its clients' goroutines and joins all of them,
+  then `StopAll`-drains the matches, *then* reads `GoroutinesAfter`, so
+  the leak check measures real residue, not in-flight teardown.
+- The admin listener is a second `http.Server`; both servers are
+  `Shutdown`- on-signal. pprof handlers are stdlib; mounting them adds
+  no new concurrency.
 
 ---
 
 ## 16. Test plan
 
 ### 16.1 internal/observ
-- `TestObserv_TickHistogramPercentile` (#7) — known samples →
+- `TestObserv_HistogramQuantileEstimate` (#7) — known samples →
   `Quantile(0.99)` lands in the bracketing bucket; `Count` exact;
   `Reset` clears.
+- `TestObserv_RecordingSamplerExact` (#7) — `RecordingSampler.Quantile`
+  returns the exact rank (so the §8 gate is exact, not interpolated).
 - `TestObserv_HistogramConcurrentObserve` — N goroutines `Observe`;
   total `Count` == N (race-free under `-race`).
 - `TestObserv_MetricsEndpoint` (#8) — `Handler` returns 200, correct
-  content-type, parseable text exposition with the documented series.
+  content-type, parseable text exposition with the documented series,
+  each with a non-trivial producer exercised.
 
 ### 16.2 internal/match
 - `TestMatch_TickDurationRecorded` (#10) — a fake clock + fake sampler;
   after K live ticks the sampler saw K observations; over-budget hook
   fires when a tick exceeds `tickInterval`; nil hooks = no-op (existing
   tests unaffected).
+- `TestMatch_OverBudgetSkipsNextSnapshot` (#10a) — inject a clock that
+  makes one tick exceed `tickInterval`; assert exactly **one** scheduled
+  snapshot beat is suppressed, `OnSnapshotDrop` fires once, cadence
+  resumes, and a burst within one interval still skips only one beat.
+- `TestRegistry_StopAll` (#3-support) — create N matches, `StopAll(ctx)`
+  ends them cleanly (no `SERVER_ERROR`), `Len()` drains to 0, and no
+  actor goroutine survives (checked under `-race` with a goroutine
+  delta).
 
 ### 16.3 cmd/isnipes
-- `TestMain_PprofGated` (#9) — handler with pprof off → `/debug/pprof/`
-  404; with the flag on → 200. `/metrics` 200 in both.
+- `TestMain_AdminListenerSeparation` (#9) — the **public** mux serves
+  `/healthz`/`/ws/*` but returns 404 for `/metrics` and `/debug/pprof/`;
+  the **admin** mux serves `/metrics` (200) always and `/debug/pprof/`
+  only when `--enable-pprof` (200 vs 404).
+- `TestNet_OriginPolicy` (#9b, in `internal/net`) — a cross-origin WS
+  handshake is rejected by default; same-origin and `--allowed-origins`
+  hosts are accepted; `--insecure-origin` accepts any (dev override).
+- `TestMain_DirectTLS` (#9c) — with `--require-tls` + a self-signed
+  cert/key from `testdata/`, the server answers HTTPS on `--addr` and a
+  plain-HTTP request is refused; without `--require-tls` it serves HTTP.
 - `TestMain_EmbedOffNotice` (#12) — default tag: static FS serves the
   "build with -tags embed" notice, not the game.
 - `TestE2E_EmbeddedClientServed` (#13, `//go:build embed`) — embed build
@@ -683,8 +945,16 @@ tick budgets). DoD #17.
   `.dockerignore`, `deploy/isnipes.service`, `deploy/nginx.conf`,
   `deploy/README.md`, `.github/workflows/ci.yml`,
   `.github/workflows/nightly.yml` exist; the workflows parse as YAML and
-  reference `test-race`, `test-load`, `perf-nightly`; the Dockerfile has
-  `FROM scratch` and `-tags embed`. DoD #14 (presence/shape), #20.
+  reference `test-race`, `test-load`, `perf-nightly` **and the frozen
+  path-diff gate**; the Dockerfile has `FROM scratch`, `-tags embed`,
+  pinned `@sha256:` builder digests, and clears `cmd/isnipes/dist`
+  before copying; the nginx example denies `/metrics` + `/debug/pprof`.
+  DoD #14 (presence/shape), #20.
+- `TestFrozen_GuardCoversProto` — `scripts/check-frozen.sh` (and the
+  re-seeded `frozen.sha256`) include every `internal/proto/*.go`
+  (frame.go, messages.go, checksum.go, …) and `internal/sim/**`; a
+  simulated edit to `internal/proto/messages.go` makes `make
+  check-frozen` fail. DoD #2.
 
 ---
 
@@ -692,28 +962,44 @@ tick budgets). DoD #17.
 
 - **60 s smoke gate slows CI** → isolated in `make test-load` as its own
   step, `-short` gives a 5 s local pass, default `go test ./...` excludes
-  it (build tag). 
-- **Tick-budget flakiness on shared CI runners** → assert against
-  buckets that bracket the threshold; the gate is P99 < 10 ms (generous
-  vs the ~sub-ms real cost at 16 players); nightly's < 5 ms is
-  regression-only, never hard-fail.
-- **Histogram quantile is an estimate** → documented; thresholds chosen
-  so the answer is unambiguous unless the server is genuinely over
-  budget; `Count`/`_sum` exported for cross-checking.
-- **Goroutine-leak false positives** → join all clients, `runtime.GC()`
-  + settle before the after-count; small `allowedSlack`; the check is
-  "no *growth* beyond slack", not "exact".
+  it (build tag).
+- **Tick-budget flakiness on shared CI runners** → the gate is P99 <
+  10 ms (generous vs the ~sub-ms real cost at 16 players); nightly's
+  < 5 ms is regression-only with a 20 % tolerance, never hard-fails a
+  PR.
+- **Gate must not be smeared by histogram estimation** → the pass/fail
+  P99 is computed from the exact `RecordingSampler`; the bucketed
+  `Histogram` is reserved for `/metrics` and is never the gate (§6.1).
+- **Goroutine-leak false positives / false negatives** → §7.2 joins all
+  clients **and** `StopAll`-drains all matches (waiting for `Len()==0`)
+  before `runtime.GC()` + settle + the after-count, so DC-grace actors
+  cannot linger and a tiny `allowedSlack` no longer masks real leaks.
+- **A promised metric with no producer** → every `/metrics` series has a
+  named producer (§6.2); the endpoint test exercises each. Production
+  bytes come from `internal/net`, not the harness's client-side tally.
+- **Bandwidth number is ambiguous** → DoD/§7.1 fix the unit to
+  application WS-message bytes and call out the excluded framing/TLS
+  overhead.
 - **RSS probe portability** → Linux `/proc` primary, `MemStats.Sys`
   fallback with a documented caveat; the soak RSS check runs on the
   Linux deploy target.
 - **`scratch` image can't do outbound TLS / has no certs** → documented;
-  TLS terminates at nginx; a CA-bundle layer is shown for the
-  direct-HTTPS case.
-- **Embedding the wrong/stale client** → `make build` always rebuilds
-  `web/dist` first; the `-tags embed` default-asset test fails if the
-  placeholder slips back in (DoD #13).
-- **pprof exposed in prod** → off by default; `/metrics` restricted via
-  the nginx example.
+  TLS terminates at nginx or via `--require-tls`; distroless or a
+  CA-bundle layer is shown for the direct-HTTPS case (§19.6).
+- **Embedding the wrong/stale client** → `make build` and the Docker
+  build clear `cmd/isnipes/dist` before copying fresh output; the
+  `-tags embed` default-asset test fails if the placeholder slips back
+  in (DoD #13).
+- **`/metrics` + pprof exposed to the internet** → both live on a
+  loopback admin listener, not the public one; pprof additionally
+  gated behind `--enable-pprof`; nginx denies both paths (§6.3, §12.2).
+- **Cross-site WebSocket hijacking** → blanket `InsecureSkipVerify` is
+  replaced with same-origin-by-default; widening requires explicit
+  `--allowed-origins`; `--insecure-origin` is dev-only and documented as
+  unsafe in prod.
+- **Frozen invariant not mechanically enforced** → manifest widened to
+  all `internal/proto/*.go` **and** a CI path-diff gate over the frozen
+  paths + the guard script/manifest themselves (§14).
 - **Adding a metrics dep bloats the minimal-dep posture** → default is
   dependency-free text exposition (§19.1).
 
@@ -725,12 +1011,18 @@ tick budgets). DoD #17.
   `cmd/isnipes` tests; P1/P3/P5 fingerprints byte-identical (no
   `internal/sim` edit; the tick timing wraps `m.tick()` and changes no
   sim state).
-- `schemaChecksum` `0x42607394`; `scripts/check-frozen.sh` green over
-  its existing manifest (DoD #2). Phase 8 edits no frozen file.
+- `schemaChecksum` `0x42607394`; `scripts/check-frozen.sh` green over a
+  **widened** manifest (now all `internal/proto/*.go` + `internal/sim/**`
+  + the client mirrors); Phase 8 edits no frozen *source* file — only the
+  guard script + its manifest, to broaden coverage (DoD #2).
 - All P4–P7 vitest + Playwright suites pass unchanged; Phase 8 adds no
   `web/src` behaviour. The embed-tag default-asset test is additive.
-- The match actor's existing tests pass with nil tick hooks (default),
-  proving the instrumentation is behaviour-neutral.
+- The match actor's existing tests pass with nil hooks (default), proving
+  the instrumentation + over-budget rule are behaviour-neutral when the
+  hooks are unset (the suppression flag still trims one snapshot beat,
+  matching SPEC §11, but existing match tests assert on sim state and
+  events, not snapshot cadence, so they are unaffected; a focused test
+  covers the cadence change).
 
 ---
 
@@ -776,6 +1068,31 @@ Flagged for codex review / author decision. Defaults listed.
    author `.github/workflows/{ci,nightly}.yml`. If the project's CI is
    elsewhere, the same `make` targets are the contract and the YAML is
    illustrative. DoD #20 checks the file shape, not a live run.
+8. **Admin-listener default.** Default: `--admin-addr=127.0.0.1:6060`
+   (on, loopback) so `/metrics` works out of the box but is host-local;
+   empty disables it. Alt: default **off** (operator must opt in).
+   Recommend loopback-on — metrics with no internet exposure is the
+   safer-and-useful middle ground.
+9. **Transport-security scope (direct TLS + origin policy).** SPEC §12
+   OQ5 says v1 documents *both* nginx and direct `--require-tls`, and the
+   current blanket `InsecureSkipVerify` is unsafe for a public deploy.
+   Default: implement both in Phase 8 (small, bounded, deploy-phase
+   appropriate, edits only `cmd/isnipes` + `internal/net`, neither
+   frozen, no wire change). Alt: ship nginx-only TLS and merely
+   *document* the origin risk, deferring the code to v1.1. Recommend
+   doing it now — a perf/deploy phase that ships an internet-facing
+   binary with no origin checks is incomplete. (If the operator wants to
+   keep Phase 8 strictly non-behavioural, this is the one item to cut;
+   flagged here so it's a conscious choice, not a silent gap.)
+10. **Over-budget snapshot suppression is a live-match behaviour change.**
+    It implements the unimplemented SPEC §11 rule and alters snapshot
+    cadence under load — by design. It touches no `internal/sim` and no
+    wire format, but it *does* change observable server output during an
+    over-budget tick. Default: include it (SPEC mandates it; the perf
+    phase is the right home). Alt: split it to its own change-set if the
+    operator wants the load harness landed first. Recommend including it;
+    the load harness is what would *surface* an over-budget condition, so
+    the fix belongs with it.
 
 ---
 
@@ -783,38 +1100,43 @@ Flagged for codex review / author decision. Defaults listed.
 
 | # | Item | Verified by |
 |---:|---|---|
-| 1 | `go test -race ./...` green incl. new observ/loadtest/cmd tests; P1/P3/P5 fingerprints byte-identical | CI |
-| 2 | `schemaChecksum` `0x42607394`; `scripts/check-frozen.sh` green; no frozen file edited | `TestSchemaChecksumValue` + `make check-frozen` |
+| 1 | `go test -race ./...` green incl. new observ/loadtest/match/net/cmd tests; P1/P3/P5 fingerprints byte-identical | CI |
+| 2 | `schemaChecksum` `0x42607394`; **widened** `scripts/check-frozen.sh` covers all `internal/proto/*.go`; an edit to `messages.go` fails it; CI path-diff gate over frozen paths + guard/manifest | `TestSchemaChecksumValue` + `TestFrozen_GuardCoversProto` + `make check-frozen` |
 | 3 | `make test-load` smoke (4×4=16 players, 60 s): no client errors, no match aborts | `TestLoad_Smoke` §16.4 |
-| 4 | Smoke P99 server tick budget < 10 ms | `TestLoad_Smoke` |
-| 5 | Smoke: no goroutine leak after teardown (≤ baseline + slack) | `TestLoad_Smoke` |
-| 6 | Smoke: mean per-client bandwidth ≤ 12 KB/s in **and** out | `TestLoad_Smoke` |
-| 7 | `internal/observ` tick histogram: `Quantile`/`Count`/`Reset`, race-free concurrent `Observe` | `TestObserv_TickHistogramPercentile` §16.1 |
-| 8 | `/metrics` serves valid Prometheus text exposition with the documented series | `TestObserv_MetricsEndpoint` §16.1 |
-| 9 | `--enable-pprof` mounts `/debug/pprof/*` only when set; off by default; `/metrics` always on | `TestMain_PprofGated` §16.3 |
+| 4 | Smoke P99 server tick budget < 10 ms, computed from the **exact** `RecordingSampler` (not the histogram) | `TestLoad_Smoke` |
+| 5 | Smoke: no goroutine leak after `StopAll`-drain + GC (small slack, not masking match actors) | `TestLoad_Smoke` + `TestRegistry_StopAll` |
+| 6 | Smoke: mean per-client bandwidth ≤ 12 KB/s in **and** out, in **application WS-message bytes** (§7.1) | `TestLoad_Smoke` |
+| 7 | `internal/observ` histogram (`Quantile`/`Count`/`Reset`, race-free `Observe`) **and** exact `RecordingSampler` | `TestObserv_HistogramQuantileEstimate` + `TestObserv_RecordingSamplerExact` §16.1 |
+| 8 | `/metrics` valid Prometheus text exposition; every documented series has a real producer | `TestObserv_MetricsEndpoint` §16.1 |
+| 9 | `/metrics` + pprof on the **admin** listener only; public mux 404s both; pprof gated by `--enable-pprof` | `TestMain_AdminListenerSeparation` §16.3 |
+| 9b | WS origin policy: same-origin by default, `--allowed-origins` widens, `--insecure-origin` dev override (replaces blanket `InsecureSkipVerify`) | `TestNet_OriginPolicy` §16.3 |
+| 9c | Direct TLS via `--require-tls`/`--tls-cert`/`--tls-key` serves HTTPS; documented in deploy guide | `TestMain_DirectTLS` §16.3 + §13 |
 | 10 | Match actor records tick duration via nil-safe sampler + over-budget hook; no sim edit | `TestMatch_TickDurationRecorded` §16.2 |
-| 11 | `make build` runs the web build then `go build -tags embed`; binary embeds the real client | `make build` + #13 |
+| 10a | Over-budget tick suppresses exactly the next scheduled snapshot (SPEC §11) + bumps `snapshot_drops_total`; never accumulates | `TestMatch_OverBudgetSkipsNextSnapshot` §16.2 |
+| 11 | `make build` runs `npm ci` + web build (no `npm install` fallback), clears dist, then `go build -tags embed`; binary embeds the real client | `make build` + #13 |
 | 12 | Plain `go build ./cmd/isnipes` (no embed) builds with empty dist and serves the "build with -tags embed / --web-dist" notice | `TestMain_EmbedOffNotice` §16.3 |
 | 13 | Embed build `GET /` serves the real bundle (references `app.js`, no "Phase 2 placeholder") | `TestE2E_EmbeddedClientServed` (`-tags embed`) §16.3 |
-| 14 | `Dockerfile` multi-stage (node → go `-tags embed` → `FROM scratch`) + `.dockerignore` present; build/run/size ≤ 15 MB | file shape (§16.5) + **deferred-to-operator** docker build |
-| 15 | `deploy/isnipes.service` hardened systemd unit present | §16.5 |
-| 16 | `deploy/nginx.conf` TLS-termination + WS-upgrade proxy present | §16.5 |
-| 17 | `deploy/README.md` documents build/docker/systemd/nginx/flags/endpoints | §16.5 |
-| 18 | `make perf-nightly` runs the 512-player (64×8) load, regression-style P99/bandwidth report | **deferred-to-operator** (`load_test --nightly`) §9 |
-| 19 | Soak (`load_test --soak`) reports goroutine-flat + RSS growth < 5 % over the window | **deferred-to-operator** §9 |
-| 20 | `.github/workflows/{ci,nightly}.yml` parse and wire `test-race`/`test-load`/`perf-nightly`; Dockerfile names `FROM scratch` + `-tags embed` | `TestDeploy_FilesPresent` §16.5 |
+| 14 | `Dockerfile` multi-stage (node → go `-tags embed` → `FROM scratch`), digest-pinned builders, clears dist before copy, `EXPOSE 8080` only, admin loopback; `.dockerignore` present; build/run/size ≤ 15 MB | file shape (§16.5) + **deferred-to-operator** docker build |
+| 15 | `deploy/isnipes.service` hardened systemd unit present (loopback `--addr` + `--admin-addr`) | §16.5 |
+| 16 | `deploy/nginx.conf` TLS-termination + WS-upgrade proxy; denies `/metrics` + `/debug/pprof` | §16.5 |
+| 17 | `deploy/README.md` documents build/docker/systemd/nginx, all flags, public-vs-admin endpoints, both TLS paths, origin policy | §16.5 |
+| 18 | `make perf-nightly` runs the 512-player (64×8) load; baseline-regression (`testdata/perf_baseline.json`, 20 % tol) exits non-zero on regression | **deferred-to-operator** (`load_test --nightly`) §9 |
+| 19 | Soak (`load_test --soak`) samples goroutines + RSS in-process; flags upward goroutine trend or RSS growth > 5 % | **deferred-to-operator** §9 |
+| 20 | `.github/workflows/{ci,nightly}.yml` parse and wire the frozen path-diff gate + `test-race`/`test-load`/`perf-nightly`; Dockerfile names `FROM scratch` + `-tags embed` | `TestDeploy_FilesPresent` §16.5 |
 | 21 | Per-file coverage ≥ 70 % for `internal/observ` and `internal/loadtest` | `go test -cover` + CI |
 
-Items 1–13, 15–17, 20, 21 are gate-able inside the implementation loop.
-Items 14 (Docker build/run/size — needs a Docker daemon), 18 and 19
-(512-player / 24 h soak — infra + runtime) are **deferred-to-operator**
-and non-PR-blocking per SPEC §8 Phase 8 and §9; their *artifacts*
-(Dockerfile, make targets, CLI flags, workflow files) are produced and
-shape-checked in the loop.
+Items 1–13, 9b, 10a, 15–17, 20, 21 are gate-able inside the
+implementation loop. Item 9c (direct TLS) is loop-testable with a
+self-signed cert in `testdata`. Items 14 (Docker build/run/size — needs
+a Docker daemon), 18 and 19 (512-player / 24 h soak — infra + runtime)
+are **deferred-to-operator** and non-PR-blocking per SPEC §8 Phase 8 and
+§9; their *artifacts* (Dockerfile, make targets, CLI flags, workflow
+files) are produced and shape-checked in the loop.
 
 The binary wire protocol is unchanged (`schemaChecksum = 0x42607394`).
-`internal/sim/**`, `internal/proto/**`, `web/src/proto.ts`,
-`web/src/sim.ts`, `web/src/prediction.ts`, `web/src/interp.ts`, and
-`web/src/netClient.ts` are not edited; the sole server changes are the
-additive, nil-safe tick instrumentation in `internal/match` and the
-pprof/`metrics`/embed wiring in `cmd/isnipes`.
+`internal/sim/**`, `internal/proto/*.go` (the encoders), and
+`web/src/{proto,sim,prediction,interp,netClient}.ts` are not edited; the
+server changes are the additive, nil-safe tick instrumentation + the
+SPEC §11 over-budget snapshot rule in `internal/match`, the origin-policy
++ byte-accounting in `internal/net`, and the admin-listener / pprof /
+`/metrics` / direct-TLS / embed wiring in `cmd/isnipes`.
