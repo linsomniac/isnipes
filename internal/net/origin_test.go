@@ -69,6 +69,15 @@ func TestNet_OriginPolicy(t *testing.T) {
 		if !dialLobbyOrigin(t, ts, "") {
 			t.Fatal("no-Origin handshake rejected")
 		}
+		// Same host, different scheme is accepted by design (host-based
+		// check) — this is what makes a TLS-terminating proxy work, where
+		// the browser Origin is https:// but the backend Host is the same
+		// host over http. ts.URL is http://127.0.0.1:PORT; an https Origin
+		// with the same host:port must still be accepted.
+		httpsOrigin := strings.Replace(ts.URL, "http://", "https://", 1)
+		if !dialLobbyOrigin(t, ts, httpsOrigin) {
+			t.Fatal("same-host https Origin rejected (would break TLS-proxy deploys)")
+		}
 	})
 
 	t.Run("AllowedOrigins widens", func(t *testing.T) {

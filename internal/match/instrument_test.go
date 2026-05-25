@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"runtime"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -215,6 +216,39 @@ func TestRegistry_StopAll(t *testing.T) {
 	// Idempotent: a second StopAll on a stopped registry is a no-op.
 	if err := reg.StopAll(ctx); err != nil {
 		t.Fatalf("second StopAll: %v", err)
+	}
+}
+
+// TestRegistry_ActiveMatchesGauge — OnActiveMatchesDelta is +1 per Create
+// and -1 per drain, so the gauge reflects live matches. (DoD #8 producer)
+func TestRegistry_ActiveMatchesGauge(t *testing.T) {
+	// The hook is called from both the caller goroutine (Create) and match
+	// Run goroutines (RemoveEnded), so it must be atomic — as the production
+	// observ.Registry gauge is.
+	var gauge atomic.Int64
+	reg := NewRegistry(RegistryConfig{
+		MaxConcurrentMatches: 16,
+		OnActiveMatchesDelta: func(d int) { gauge.Add(int64(d)) },
+	})
+	const n = 3
+	for i := 0; i < n; i++ {
+		if _, err := reg.Create(MatchConfig{
+			MatchID:     fmt.Sprintf("gauge-%d", i),
+			PlayerSlots: []PendingJoin{{PlayerID: sim.EntityID(1), Token: fmt.Sprintf("t-%d", i)}},
+		}); err != nil {
+			t.Fatalf("Create %d: %v", i, err)
+		}
+	}
+	if got := gauge.Load(); got != n {
+		t.Fatalf("active gauge=%d want %d after Create", got, n)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := reg.StopAll(ctx); err != nil {
+		t.Fatalf("StopAll: %v", err)
+	}
+	if got := gauge.Load(); got != 0 {
+		t.Fatalf("active gauge=%d want 0 after drain", got)
 	}
 }
 

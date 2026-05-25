@@ -31,6 +31,7 @@ import (
 	"os"
 	"os/signal"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -96,6 +97,7 @@ func main() {
 		TickSampler:          metrics.TickHistogram(),
 		OnTickOverBudget:     metrics.IncTickOverBudget,
 		OnSnapshotDrop:       metrics.IncSnapshotDrop,
+		OnActiveMatchesDelta: metrics.AddActiveMatches,
 	})
 	lob := lobby.NewLobby(lobby.Config{
 		Registry:      registry,
@@ -134,17 +136,23 @@ func main() {
 	}()
 
 	// Admin listener: /metrics always, pprof when enabled. Loopback by
-	// default so neither is exposed to the internet (PHASE8 §6.3).
+	// default so neither is exposed to the internet (PHASE8 §6.3). Bound
+	// synchronously and fatal on failure so we never claim readiness while
+	// the configured /metrics endpoint is silently down.
 	var adminSrv *http.Server
 	if *adminAddr != "" {
+		adminLn, err := net.Listen("tcp", *adminAddr)
+		if err != nil {
+			slog.Error("admin listen", "addr", *adminAddr, "err", err)
+			os.Exit(1)
+		}
 		adminSrv = &http.Server{
-			Addr:              *adminAddr,
 			Handler:           newAdminMux(metrics, *enablePprof),
 			ReadHeaderTimeout: 10 * time.Second,
 		}
 		slog.Info("admin listening", "addr", *adminAddr, "pprof", *enablePprof)
 		go func() {
-			if err := adminSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			if err := adminSrv.Serve(adminLn); err != nil && err != http.ErrServerClosed {
 				slog.Error("admin serve", "err", err)
 			}
 		}()
@@ -154,15 +162,36 @@ func main() {
 	signal.Notify(sigCh, syscall.SIGTERM, syscall.SIGINT)
 	<-sigCh
 	slog.Info("shutting down")
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	_ = httpSrv.Shutdown(ctx)
-	if adminSrv != nil {
-		_ = adminSrv.Shutdown(ctx)
+
+	// Drain HTTP listeners concurrently so a slow in-flight request (e.g. a
+	// pprof profile on the admin port) cannot starve the match-drain
+	// deadline that follows.
+	httpCtx, cancelHTTP := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancelHTTP()
+	var wg sync.WaitGroup
+	for _, s := range []*http.Server{httpSrv, adminSrv} {
+		if s == nil {
+			continue
+		}
+		wg.Add(1)
+		go func(s *http.Server) {
+			defer wg.Done()
+			if err := s.Shutdown(httpCtx); err != nil {
+				slog.Warn("http shutdown", "err", err)
+			}
+		}(s)
 	}
+	wg.Wait()
+
 	lob.Stop()
 	<-lobbyDone
-	_ = registry.StopAll(ctx) // graceful, deterministic match drain
+
+	// Graceful, deterministic match drain on its own deadline.
+	stopCtx, cancelStop := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancelStop()
+	if err := registry.StopAll(stopCtx); err != nil {
+		slog.Warn("match drain", "err", err)
+	}
 }
 
 // serve starts srv on ln, with direct TLS when requireTLS.

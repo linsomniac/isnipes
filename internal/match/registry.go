@@ -24,6 +24,11 @@ type RegistryConfig struct {
 	TickSampler      TickObserver
 	OnTickOverBudget func()
 	OnSnapshotDrop   func()
+
+	// OnActiveMatchesDelta updates the active-matches gauge: +1 on Create,
+	// -1 on RemoveEnded. Owned by the registry (the goroutine that mutates
+	// the matches map), never polled. Nil-safe.
+	OnActiveMatchesDelta func(delta int)
 }
 
 // Registry is the lookup table of live matches. It is safe for
@@ -66,6 +71,9 @@ func (r *Registry) Create(mc MatchConfig) (*Match, error) {
 		return nil, err
 	}
 	r.matches[mc.MatchID] = m
+	if r.cfg.OnActiveMatchesDelta != nil {
+		r.cfg.OnActiveMatchesDelta(1)
+	}
 	go func() {
 		m.Run()
 		r.RemoveEnded(mc.MatchID)
@@ -84,8 +92,12 @@ func (r *Registry) Lookup(id string) (*Match, bool) {
 // RemoveEnded deletes the entry once Run() has returned.
 func (r *Registry) RemoveEnded(id string) {
 	r.mu.Lock()
-	defer r.mu.Unlock()
+	_, existed := r.matches[id]
 	delete(r.matches, id)
+	r.mu.Unlock()
+	if existed && r.cfg.OnActiveMatchesDelta != nil {
+		r.cfg.OnActiveMatchesDelta(-1)
+	}
 }
 
 // Len reports the number of live matches.

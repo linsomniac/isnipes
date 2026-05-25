@@ -28,10 +28,17 @@ type ServerConfig struct {
 	ServerVersion    string
 
 	// Phase 8 § transport-security — WebSocket origin policy. Default
-	// (both zero) enforces SAME-ORIGIN: a browser may only open the WS
-	// from a page served by this same host, blocking cross-site WebSocket
-	// hijacking. AllowedOrigins widens that to additional hosts (nhooyr
-	// OriginPatterns, e.g. "localhost:5173" for a separate dev front-end).
+	// (both zero) enforces nhooyr's SAME-HOST check: the browser's Origin
+	// host must equal the request Host, blocking cross-site WebSocket
+	// hijacking from another site. (The check is host-based, not
+	// scheme-based — which is deliberately what you want behind a
+	// TLS-terminating proxy, where the browser Origin is https:// but the
+	// backend sees http://; a scheme-strict check would false-reject that
+	// standard deployment. There are no ambient cookies/credentials —
+	// auth is the per-match joinToken — so host-based matching is the
+	// right defence here.) AllowedOrigins widens to extra hosts (nhooyr
+	// OriginPatterns, e.g. "localhost:5173" for a separate dev front-end;
+	// note "*" matches any host and is equivalent to InsecureOrigin).
 	// InsecureOrigin disables the check entirely — DEV ONLY; never in prod.
 	AllowedOrigins []string
 	InsecureOrigin bool
