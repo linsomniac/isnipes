@@ -39,6 +39,14 @@ func TestLoad_DriverSmall(t *testing.T) {
 	if rep.GoroutineLeaked(2) {
 		t.Fatalf("goroutine leak: before=%d after=%d", rep.GoroutinesBefore, rep.GoroutinesAfter)
 	}
+	// joined_players is a real producer wired through the actor: every join
+	// (+1) must be balanced by drop/end (-N), so after teardown it is 0.
+	if jp := reg.JoinedPlayers(); jp != 0 {
+		t.Fatalf("joined_players gauge=%d after teardown, want 0 (unbalanced join/leave)", jp)
+	}
+	if am := reg.ActiveMatches(); am != 0 {
+		t.Fatalf("active_matches gauge=%d after teardown, want 0", am)
+	}
 }
 
 // TestLoad_ClientCountsMidRunDrop — a client whose socket the server drops

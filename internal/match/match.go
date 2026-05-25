@@ -124,6 +124,7 @@ type MatchConfig struct {
 	TickSampler      TickObserver // Observe(tickDuration)
 	OnTickOverBudget func()       // tick exceeded the 33ms budget
 	OnSnapshotDrop   func()       // a snapshot was suppressed to catch up
+	OnJoinedDelta    func(int)    // joined-players gauge: +1 join, -1 drop, -N end
 }
 
 // controlMsg is the internal inbox payload.
@@ -206,6 +207,7 @@ type Match struct {
 	tickObserver     TickObserver
 	onTickOverBudget func()
 	onSnapshotDrop   func()
+	onJoinedDelta    func(int)
 	overBudget       bool
 
 	// gracefulShutdown is set (actor-goroutine only) by shutdown() so the
@@ -304,6 +306,7 @@ func NewMatch(cfg MatchConfig) (*Match, error) {
 		tickObserver:     cfg.TickSampler,
 		onTickOverBudget: cfg.OnTickOverBudget,
 		onSnapshotDrop:   cfg.OnSnapshotDrop,
+		onJoinedDelta:    cfg.OnJoinedDelta,
 	}
 	for _, p := range cfg.PlayerSlots {
 		m.slots[p.PlayerID] = &Slot{PlayerID: p.PlayerID, Nick: p.Nick, closed: make(chan struct{})}
@@ -605,6 +608,7 @@ func (m *Match) handleJoin(v ctlJoin) {
 	}
 	slot.Joined = true
 	slot.out = v.Out
+	m.adjustJoined(1)            // joined-players gauge
 	delete(m.bySession, v.Token) // tokens are single-use
 
 	// Phase 2 §8.2: send player_join, MapInit, Scoreboard, Snapshot,
@@ -918,6 +922,7 @@ func (m *Match) endMatch(reason uint8, winner sim.EntityID) {
 	}
 	m.setState(StateEnded)
 	m.endedAt = m.clock()
+	m.releaseJoinedGauge()
 
 	finalTick := m.sim.ServerTick()
 	m.broadcastEvent(proto.Event{
@@ -985,6 +990,28 @@ func (m *Match) recordTick(d time.Duration) {
 	}
 }
 
+// adjustJoined moves the process-wide joined-players gauge by delta
+// (nil-safe). +1 on a fresh join, -1 when a DC-graced slot is dropped, -N at
+// match termination. DC (without drop) and reconnect do not change it.
+func (m *Match) adjustJoined(delta int) {
+	if m.onJoinedDelta != nil && delta != 0 {
+		m.onJoinedDelta(delta)
+	}
+}
+
+// releaseJoinedGauge decrements the gauge by the number of still-joined
+// slots at match termination. Each termination path is guarded by the
+// StateEnded check, so this runs once and cannot double-release.
+func (m *Match) releaseJoinedGauge() {
+	n := 0
+	for _, s := range m.slots {
+		if s.Joined {
+			n++
+		}
+	}
+	m.adjustJoined(-n)
+}
+
 // shutdown ends the match gracefully: no SERVER_ERROR MatchOver (so the
 // load harness does not count it as a MatchAbort) — clients simply get a
 // clean WS close. Used for process shutdown and deterministic test
@@ -996,6 +1023,7 @@ func (m *Match) shutdown() {
 	m.gracefulShutdown = true
 	m.setState(StateEnded)
 	m.endedAt = m.clock()
+	m.releaseJoinedGauge()
 	for _, slot := range m.slots {
 		if slot.out != nil {
 			m.closeSlot(slot)
@@ -1011,6 +1039,7 @@ func (m *Match) abort(reason string) {
 	}
 	m.setState(StateEnded)
 	m.endedAt = m.clock()
+	m.releaseJoinedGauge()
 	if m.sim != nil {
 		// Best-effort MatchOver. One match_end broadcast, then one
 		// MatchOver per slot.

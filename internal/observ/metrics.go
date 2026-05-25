@@ -58,6 +58,10 @@ func (r *Registry) AddJoinedPlayers(delta int) { r.joinedPlayers.Add(int64(delta
 func (r *Registry) SetActiveMatches(n int) { r.activeMatches.Store(int64(n)) }
 func (r *Registry) SetJoinedPlayers(n int) { r.joinedPlayers.Store(int64(n)) }
 
+// ActiveMatches / JoinedPlayers read the current gauge values.
+func (r *Registry) ActiveMatches() int64 { return r.activeMatches.Load() }
+func (r *Registry) JoinedPlayers() int64 { return r.joinedPlayers.Load() }
+
 // secondsLabel formats a duration as a Prometheus le bound in seconds.
 func secondsLabel(d time.Duration) string {
 	return strconv.FormatFloat(d.Seconds(), 'g', -1, 64)

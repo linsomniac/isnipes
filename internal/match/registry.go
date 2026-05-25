@@ -24,6 +24,7 @@ type RegistryConfig struct {
 	TickSampler      TickObserver
 	OnTickOverBudget func()
 	OnSnapshotDrop   func()
+	OnJoinedDelta    func(delta int)
 
 	// OnActiveMatchesDelta updates the active-matches gauge: +1 on Create,
 	// -1 on RemoveEnded. Owned by the registry (the goroutine that mutates
@@ -66,6 +67,7 @@ func (r *Registry) Create(mc MatchConfig) (*Match, error) {
 	mc.TickSampler = r.cfg.TickSampler
 	mc.OnTickOverBudget = r.cfg.OnTickOverBudget
 	mc.OnSnapshotDrop = r.cfg.OnSnapshotDrop
+	mc.OnJoinedDelta = r.cfg.OnJoinedDelta
 	m, err := NewMatch(mc)
 	if err != nil {
 		return nil, err

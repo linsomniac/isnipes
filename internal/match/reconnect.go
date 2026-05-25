@@ -118,6 +118,9 @@ func (m *Match) dropDCSlot(pid sim.EntityID, slot *Slot) {
 	m.dcTokensMu.Unlock()
 	// closeOnce ensures slot.closed is signalled once.
 	slot.closeOnce.Do(func() { close(slot.closed) })
+	if slot.Joined {
+		m.adjustJoined(-1) // balance the +1 from this slot's join
+	}
 	delete(m.slots, pid)
 }
 

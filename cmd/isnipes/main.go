@@ -88,6 +88,7 @@ func main() {
 		TickSampler:          metrics.TickHistogram(),
 		OnTickOverBudget:     metrics.IncTickOverBudget,
 		OnSnapshotDrop:       metrics.IncSnapshotDrop,
+		OnJoinedDelta:        metrics.AddJoinedPlayers,
 		OnActiveMatchesDelta: metrics.AddActiveMatches,
 	})
 	lob := lobby.NewLobby(lobby.Config{

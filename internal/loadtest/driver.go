@@ -71,6 +71,7 @@ func runLoad(cfg Config, reg *observ.Registry) (Report, error) {
 		TickSampler:          fanOut{rec, reg.TickHistogram()},
 		OnTickOverBudget:     func() { ticksOver.Add(1); reg.IncTickOverBudget() },
 		OnSnapshotDrop:       func() { drops.Add(1); reg.IncSnapshotDrop() },
+		OnJoinedDelta:        reg.AddJoinedPlayers,
 		OnActiveMatchesDelta: reg.AddActiveMatches,
 	})
 	lob := lobby.NewLobby(lobby.Config{Registry: matchReg})
