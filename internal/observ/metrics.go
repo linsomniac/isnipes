@@ -10,12 +10,15 @@ import (
 	"time"
 )
 
-// Registry is the process-wide metrics surface scraped by /metrics. Every
-// series has a real producer (PHASE8 §6.2): the tick histogram + over-budget
-// counter from the match actor (§6.4/§6.5), bytes from internal/net, the
-// drop counter from the over-budget rule, and the active-matches /
-// joined-players gauges from the registry / actor. All mutators are atomic;
-// scrape reads an atomic snapshot.
+// Registry is the process-wide metrics surface scraped by /metrics. Each
+// series is DESIGNED to have a real producer wired by its owning package in
+// later Phase 8 work (PHASE8 §6.2): the tick histogram + over-budget counter
+// from the match actor (§6.4/§6.5), bytes from internal/net, the drop
+// counter from the over-budget rule, and the active-matches / joined-players
+// gauges from the registry / actor. This package provides the thread-safe
+// sinks + exposition; the production wiring + admin-listener mount land with
+// DoD #9/#10 / the load harness. All mutators are atomic; scrape reads an
+// atomic snapshot.
 type Registry struct {
 	tickHist *Histogram
 
@@ -99,11 +102,20 @@ func writeGauge(w io.Writer, name, help string, v int64) {
 	fmt.Fprintf(w, "# HELP %s %s\n# TYPE %s gauge\n%s %d\n", name, help, name, name, v)
 }
 
-// Handler serves GET /metrics in Prometheus text-exposition format. It is
-// intended for the admin listener only (PHASE8 §6.3), never the public mux.
+// Handler serves GET/HEAD /metrics in Prometheus text-exposition format. It
+// is intended for the admin listener only (PHASE8 §6.3), never the public
+// mux. Non-GET/HEAD methods get 405.
 func (r *Registry) Handler() http.HandlerFunc {
 	return func(w http.ResponseWriter, req *http.Request) {
+		if req.Method != http.MethodGet && req.Method != http.MethodHead {
+			w.Header().Set("Allow", "GET, HEAD")
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
 		w.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
+		if req.Method == http.MethodHead {
+			return
+		}
 		r.WriteProm(w)
 	}
 }

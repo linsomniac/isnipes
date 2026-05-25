@@ -6,6 +6,7 @@
 package observ
 
 import (
+	"math"
 	"slices"
 	"sync"
 	"sync/atomic"
@@ -39,7 +40,6 @@ type Histogram struct {
 	bounds []time.Duration
 	counts []atomic.Uint64 // len(bounds)+1; last is the +Inf bucket
 	sumNS  atomic.Uint64
-	total  atomic.Uint64
 }
 
 // NewLatencyHistogram returns a Histogram with the tick-budget buckets.
@@ -62,37 +62,51 @@ func (h *Histogram) bucketIndex(d time.Duration) int {
 }
 
 // Observe records a single duration. Negative durations are clamped to 0.
+// The observation count is derived from the buckets (not a separate atomic),
+// so the exported _count always equals the +Inf bucket — the Prometheus
+// histogram invariant cannot be transiently violated (codex P1).
 func (h *Histogram) Observe(d time.Duration) {
 	if d < 0 {
 		d = 0
 	}
 	h.counts[h.bucketIndex(d)].Add(1)
 	h.sumNS.Add(uint64(d.Nanoseconds()))
-	h.total.Add(1)
 }
 
-// Count returns the number of observations.
-func (h *Histogram) Count() uint64 { return h.total.Load() }
+// Count returns the number of observations (sum of all buckets).
+func (h *Histogram) Count() uint64 {
+	_, total := h.snapshot()
+	return total
+}
 
-// Sum returns the summed duration of all observations.
+// Sum returns the summed duration of all observations. (Sum may skew from
+// Count by at most one in-flight observation under concurrent Observe; the
+// hard invariant _count == +Inf bucket is preserved because both derive
+// from the same snapshot.)
 func (h *Histogram) Sum() time.Duration { return time.Duration(h.sumNS.Load()) }
 
-// Reset zeroes every bucket and the running sum/count.
+// Reset zeroes every bucket and the running sum. NOT safe to call
+// concurrently with Observe — intended for quiescent reuse (tests). Calling
+// it while observations are in flight may leave sum and bucket counts
+// momentarily inconsistent (codex P2).
 func (h *Histogram) Reset() {
 	for i := range h.counts {
 		h.counts[i].Store(0)
 	}
 	h.sumNS.Store(0)
-	h.total.Store(0)
 }
 
-// snapshot returns a consistent-enough copy of bucket counts and the total.
+// snapshot returns a copy of bucket counts and their sum (the observation
+// total). Deriving total from the same loaded counts guarantees coherence
+// between the +Inf bucket and _count.
 func (h *Histogram) snapshot() (counts []uint64, total uint64) {
 	counts = make([]uint64, len(h.counts))
 	for i := range h.counts {
-		counts[i] = h.counts[i].Load()
+		c := h.counts[i].Load()
+		counts[i] = c
+		total += c
 	}
-	return counts, h.total.Load()
+	return counts, total
 }
 
 // Quantile estimates the q-quantile (0..1) via linear interpolation within
@@ -100,12 +114,7 @@ func (h *Histogram) snapshot() (counts []uint64, total uint64) {
 // +Inf bucket returns the last finite bound (a conservative lower estimate;
 // documented as an estimate). This is for /metrics reporting only.
 func (h *Histogram) Quantile(q float64) time.Duration {
-	if q < 0 {
-		q = 0
-	}
-	if q > 1 {
-		q = 1
-	}
+	q = clampQuantile(q)
 	counts, total := h.snapshot()
 	if total == 0 {
 		return 0
@@ -171,12 +180,7 @@ func (s *RecordingSampler) Len() int {
 // Quantile returns the exact q-quantile (nearest-rank) over a sorted copy
 // of the samples; 0 with no data.
 func (s *RecordingSampler) Quantile(q float64) time.Duration {
-	if q < 0 {
-		q = 0
-	}
-	if q > 1 {
-		q = 1
-	}
+	q = clampQuantile(q)
 	s.mu.Lock()
 	cp := make([]time.Duration, len(s.samples))
 	copy(cp, s.samples)
@@ -187,7 +191,7 @@ func (s *RecordingSampler) Quantile(q float64) time.Duration {
 	}
 	slices.Sort(cp)
 	// Nearest-rank: rank = ceil(q*n), 1-based; clamp to [1,n].
-	rank := int(float64(n)*q + 0.9999999999)
+	rank := int(math.Ceil(float64(n) * q))
 	if rank < 1 {
 		rank = 1
 	}
@@ -195,4 +199,15 @@ func (s *RecordingSampler) Quantile(q float64) time.Duration {
 		rank = n
 	}
 	return cp[rank-1]
+}
+
+// clampQuantile maps q into [0,1]; NaN → 0.
+func clampQuantile(q float64) float64 {
+	if math.IsNaN(q) || q < 0 {
+		return 0
+	}
+	if q > 1 {
+		return 1
+	}
+	return q
 }

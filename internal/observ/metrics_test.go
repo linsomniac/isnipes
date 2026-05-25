@@ -1,11 +1,11 @@
 package observ
 
 import (
-	"io"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -25,21 +25,16 @@ func TestObserv_MetricsEndpoint(t *testing.T) {
 	r.SetActiveMatches(3)
 	r.SetJoinedPlayers(7)
 
-	srv := httptest.NewServer(r.Handler())
-	defer srv.Close()
-	resp, err := http.Get(srv.URL)
-	if err != nil {
-		t.Fatalf("GET: %v", err)
+	rec := httptest.NewRecorder()
+	r.Handler()(rec, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status=%d want 200", rec.Code)
 	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("status=%d want 200", resp.StatusCode)
-	}
-	if ct := resp.Header.Get("Content-Type"); ct != "text/plain; version=0.0.4; charset=utf-8" {
+	if ct := rec.Header().Get("Content-Type"); ct != "text/plain; version=0.0.4; charset=utf-8" {
 		t.Fatalf("content-type=%q", ct)
 	}
 
-	body := readAll(t, resp)
+	body := rec.Body.String()
 	values := parseExposition(t, body)
 
 	wantSeries := []string{
@@ -99,13 +94,68 @@ func TestObserv_WritePromValidLines(t *testing.T) {
 	}
 }
 
-func readAll(t *testing.T, resp *http.Response) string {
-	t.Helper()
-	b, err := io.ReadAll(resp.Body)
-	if err != nil {
-		t.Fatalf("read body: %v", err)
+// TestObserv_MetricsMethodNotAllowed — non-GET/HEAD gets 405 with Allow.
+func TestObserv_MetricsMethodNotAllowed(t *testing.T) {
+	r := NewRegistry()
+	rec := httptest.NewRecorder()
+	r.Handler()(rec, httptest.NewRequest(http.MethodPost, "/metrics", nil))
+	if rec.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("status=%d want 405", rec.Code)
 	}
-	return string(b)
+	if a := rec.Header().Get("Allow"); a != "GET, HEAD" {
+		t.Fatalf("Allow=%q", a)
+	}
+}
+
+// TestObserv_HistogramCountEqualsInfBucket asserts the Prometheus invariant
+// _count == +Inf bucket holds even while a writer races the scrape — both
+// derive from the same bucket snapshot. (codex P1)
+func TestObserv_HistogramCountEqualsInfBucket(t *testing.T) {
+	r := NewRegistry()
+	stop := make(chan struct{})
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+				r.TickHistogram().Observe(time.Duration(time.Now().UnixNano()%5_000_000) * time.Nanosecond)
+			}
+		}
+	}()
+	for i := 0; i < 200; i++ {
+		var sb strings.Builder
+		r.WriteProm(&sb)
+		vals := parseExposition(t, sb.String())
+		inf := infBucket(t, sb.String())
+		if vals["isnipes_tick_seconds_count"] != inf {
+			t.Fatalf("_count=%v != +Inf bucket=%v", vals["isnipes_tick_seconds_count"], inf)
+		}
+		if vals["isnipes_ticks_total"] != inf {
+			t.Fatalf("ticks_total=%v != +Inf bucket=%v", vals["isnipes_ticks_total"], inf)
+		}
+	}
+	close(stop)
+	wg.Wait()
+}
+
+func infBucket(t *testing.T, body string) float64 {
+	t.Helper()
+	for _, line := range strings.Split(body, "\n") {
+		if strings.HasPrefix(line, `isnipes_tick_seconds_bucket{le="+Inf"} `) {
+			idx := strings.LastIndexByte(line, ' ')
+			v, err := strconv.ParseFloat(line[idx+1:], 64)
+			if err != nil {
+				t.Fatalf("parse +Inf bucket: %v", err)
+			}
+			return v
+		}
+	}
+	t.Fatalf("no +Inf bucket line in:\n%s", body)
+	return 0
 }
 
 // parseExposition collects the last value seen for each bare series name
