@@ -1,0 +1,38 @@
+# PHASE8.md §12.1 — hardened systemd unit for isnipes.
+# Install: copy the binary to /usr/local/bin/isnipes and this file to
+# /etc/systemd/system/isnipes.service, then:
+#   systemctl daemon-reload && systemctl enable --now isnipes
+[Unit]
+Description=isnipes game server
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+# Public listener on loopback; nginx (deploy/nginx.conf) fronts it with TLS.
+# The admin listener (/metrics + pprof) is loopback and host-local.
+ExecStart=/usr/local/bin/isnipes --addr=127.0.0.1:8080 --admin-addr=127.0.0.1:6060
+Restart=on-failure
+RestartSec=2
+
+# Run as a transient unprivileged user with no ambient capabilities
+# (binds an unprivileged port, needs none).
+DynamicUser=yes
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+# Filesystem + kernel hardening.
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_INET AF_INET6
+RestrictNamespaces=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+
+[Install]
+WantedBy=multi-user.target

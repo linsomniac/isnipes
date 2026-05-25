@@ -1,0 +1,15 @@
+# Keep the build context small and deterministic. *_test.go is NOT excluded
+# (the go build ignores test files anyway, and excluding them would break a
+# `go test` run inside a derived image).
+.git
+.github
+node_modules
+web/node_modules
+web/dist
+web/coverage
+cmd/isnipes/dist
+isnipes
+.codex
+.phase-loop-notes.md
+*.md
+deploy
