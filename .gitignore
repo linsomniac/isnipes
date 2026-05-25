@@ -11,3 +11,7 @@ coverage.out
 /web/coverage/
 /node_modules/
 /.claude/
+
+# Phase 8: embedded client build artifacts (produced by `make build`).
+/cmd/isnipes/dist/*
+!/cmd/isnipes/dist/.gitkeep

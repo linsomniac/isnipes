@@ -20,7 +20,6 @@ package main
 
 import (
 	"context"
-	"embed"
 	"flag"
 	"fmt"
 	"io/fs"
@@ -40,9 +39,6 @@ import (
 	wsnet "github.com/jafo/isnipes/internal/net"
 	"github.com/jafo/isnipes/internal/observ"
 )
-
-//go:embed all:dist
-var embeddedFS embed.FS
 
 const version = "v0.0.0-phase2"
 
@@ -75,12 +71,7 @@ func main() {
 	if *webDist != "" {
 		staticFS = os.DirFS(*webDist)
 	} else {
-		sub, err := fs.Sub(embeddedFS, "dist")
-		if err != nil {
-			slog.Error("embed fs", "err", err)
-			os.Exit(1)
-		}
-		staticFS = sub
+		staticFS = embeddedStatic()
 	}
 
 	if *requireTLS && (*tlsCert == "" || *tlsKey == "") {
