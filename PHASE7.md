@@ -31,9 +31,9 @@ server change** (the Chat-frame relay, §7). The hard invariants are:
 - **`internal/sim` is not edited.** The Phase 1/3/5 determinism
   fingerprints stay byte-identical.
 - **`schemaChecksum` stays `0x42607394`.** `internal/proto/checksum.go`
-  and `web/src/proto.ts` are not edited. The Chat (`0x05`) and
-  `Event/ChatRelay` (`0x0C`) frame types the chat relay uses are
-  **already** in the schema, so wiring them changes no checksum.
+  and `web/src/proto.ts` are not edited. The chat relay reuses the
+  existing `Chat` (`0x05`) frame (the S→C direction adds a sender prefix
+  as a relay convention, §7.2), so wiring it changes no checksum.
 
 Phase 7 ships:
 
@@ -495,28 +495,44 @@ SPEC §3.9 requires dead-cam players to chat; §3.10.1 binds `T`/`Enter`/
 currently **ignores** it (`internal/net/server.go` drops unknown types;
 `internal/match` accepts only `Input`/`Chat` slots but does not relay
 chat). Phase 7 adds the relay. This is the **only** server change and
-it touches **no wire schema** — `Chat` (0x05) and `Event/ChatRelay`
-(0x0C) already exist in the descriptor, so `schemaChecksum` is unchanged.
+it touches **no wire schema** — the `Chat` (0x05) frame type already
+exists in the descriptor, so `schemaChecksum` is unchanged.
 
-### 7.2 Relay design
+### 7.2 Relay design — single self-attributing frame
 
-`internal/match/chat.go`: when the match actor receives a `Chat`
-(0x05) `{text}` from a slot (including a dead-cam slot, per §3.9):
+The relay is **one** `Chat` (0x05) frame carrying the sender, not a pair
+of frames. The two-frame design originally sketched here (a `ChatRelay`
+event for attribution immediately followed by the `Chat` text frame) is
+unsound: a slot's outbound channel has **two producers** — the match
+actor *and* the net reader's Pong echo (`internal/net/server.go`) — so a
+`Pong` can interleave between the event and the text, orphaning the
+attribution. A single frame is atomic (one send, drop-or-deliver) and
+immune to interleaving/backpressure. See §19.5 (RESOLVED).
 
-1. Validate `1 ≤ len(text) ≤ 255` (the frame's `u8 len` ceiling) and
-   trim; reject empty (drop, no error frame — the match WS has no Error
-   frame, §4.3.5).
-2. Re-broadcast to every connected slot (incl. dead-cam) as the pair:
-   - an `Event` (0x04) `{kind: ChatRelay(0x0C), actor: senderEntityID,
-     target: 0, reason: 1 /* match scope, SPEC §541 */}` — so the client
-     learns *who* sent it (the registry maps `actor` → nick via the
-     cached `Scoreboard`), then
-   - the `Chat` (0x05) `{text}` frame carrying the message body.
-   The client correlates the two consecutive frames (relay event
-   immediately followed by the chat text). **This pairing is the one
-   genuinely under-specified wire detail — see open question §19.5.**
+The `Chat` (0x05) payload is **asymmetric by direction**:
+
+```
+C→S Chat:  [u8 len][utf8 text]              (client → server)
+S→C Chat:  [u32 sender][u8 len][utf8 text]  (server → client relay)
+```
+
+`schemaChecksum` is unchanged: the descriptor's canonical `Chat` shape
+(`[u8 len][utf8 text]`, what the *client* emits) is what the handshake
+verifies; the S→C sender prefix is a server→client relay convention the
+in-repo client mirrors in lockstep, and `checksum.go` is not edited.
+
+`internal/match/chat.go`: when the match actor receives a `Chat` (0x05)
+`{text}` from a slot (including a dead-cam slot, per §3.9):
+
+1. Validate, trim, reject empty (drop — the match WS has no Error frame,
+   §4.3.5). Truncate to ≤ 255 bytes **on a UTF-8 boundary** so a
+   multi-byte char can't wrap the `u8 len`. Reject non-UTF-8 text.
+2. Re-broadcast a single S→C `Chat` frame `[u32 senderEntityID][u8 len]
+   [text]` to every connected slot (incl. dead-cam). The client reads
+   the sender directly off the frame and maps it to a nick via the cached
+   `Scoreboard` (`HudModel.nickById`, fallback `"Player <id>"`).
 3. Per-slot best-effort: a full out-queue drops the message for that
-   slot only.
+   slot only (never closes the slot).
 
 A per-slot rate limit mirrors the lobby's (§P6 6.2): 4 msgs / 2 s.
 
@@ -533,7 +549,7 @@ A per-slot rate limit mirrors the lobby's (§P6 6.2): 4 msgs / 2 s.
 | `EntityKill`, target unknown | `hit` (conservative) |
 | `GeneratorDestroyed` | `generator` |
 | `PlayerJoin` / `PlayerRejoin` | `spawn` |
-| `ChatRelay` and all others | silent |
+| all other kinds | silent |
 
 `onMatchOver(reason)` plays `victory` for `PVE_COMPLETE`/`LAST_STANDING`/
 `TIMER`; silent for `ALL_ELIMINATED`/`SERVER_ERROR`.
@@ -547,11 +563,11 @@ fake sink recording `(cue, gain)`. DoD #12/#13.
 ### 7.4 Client overlay
 
 `hud.ts` keeps a chat ring buffer (`ChatLine[]`, cap 50). `T` opens an
-input line (`input.ts` `chatOpen`); `Enter` sends a `Chat` frame via
-`netClient`; `Esc` cancels. Incoming relay-event + chat-text pairs
-append a `ChatLine{fromId, fromNick, text}` (nick from
-`HudModel.nickById`, fallback `"Player <id>"`). The overlay renders in
-both live and dead-cam states. DoD #18.
+input line (`input.ts` `chatOpen`); `Enter` sends a C→S `Chat` frame
+(`[u8 len][text]`); `Esc` cancels. Each incoming S→C `Chat` frame
+(`[u32 sender][u8 len][text]`) appends a `ChatLine{fromId, fromNick,
+text}` (nick from `HudModel.nickById`, fallback `"Player <id>"`). The
+overlay renders in both live and dead-cam states. DoD #18.
 
 ---
 
@@ -700,8 +716,9 @@ golden harness bypasses the live path. DoD #27.
 No schema change. `schemaChecksum = 0x42607394`. Phase 7 consumes
 `MapInit`, `Snapshot`, `Event`, `Chat`, `Scoreboard`, `MatchOver`
 (all pre-defined) and the lobby `level_presets` JSON envelope (P6). The
-chat relay reuses `Chat` (0x05) + `Event/ChatRelay` (0x0C); both are
-already in the descriptor.
+chat relay reuses the existing `Chat` (0x05) frame; the S→C relay
+direction prepends a `u32 sender` to the payload as a server→client
+convention (§7.2), leaving the checksum descriptor untouched.
 
 ---
 
@@ -798,8 +815,9 @@ decoders), documented in `fixtures/README.md` (incl.
   + DoD #25.
 - **Server-list / cross-origin token leak** → URL hardening + relative
   match-path resolution (§10.3) + DoD #24.
-- **Chat relay sender attribution** → the relay-event/chat-text pairing
-  (§7.2) is the one under-specified wire detail; open question §19.5.
+- **Chat relay sender attribution** → resolved to a single
+  self-attributing `Chat` frame (§7.2); a two-frame pair would split under
+  the actor/Pong two-producer race. See §19.5 (RESOLVED).
 - **WebAudio autoplay** → lazy `AudioContext` on first gesture; no-op
   before; fake sink in tests.
 - **`OffscreenCanvas` absence** → detached `<canvas>` fallback.
@@ -835,17 +853,28 @@ Flagged for codex review / author decision. Defaults listed.
 4. **Golden baseline engine.** Default: Chromium-on-linux baselines; the
    PR runner must match. A pinned-container render is the robust fix
    (Phase 8 CI hardening); 2 % usually absorbs sub-pixel AA otherwise.
-5. **In-match chat sender attribution (wire).** SPEC defines `Chat`
-   (0x05) `{len,text}` (no sender) and `Event/ChatRelay` (0x0C)
-   `{kind,actor,target,reason}` (no text). Default: the server emits a
-   `ChatRelay` event (`actor = senderEntityID`, `reason = 1` match
-   scope) **immediately followed by** the `Chat` text frame, and the
-   client correlates the consecutive pair; nick comes from the cached
-   `Scoreboard`. This adds **no** new frame type and no checksum change.
-   Alternative (rejected for v1): widen the `Chat` frame to carry a
-   sender id — that *would* change the schema/checksum and is out of
-   scope. **Operator: confirm the pairing approach before
-   implementation of §7.2.**
+5. **In-match chat sender attribution (wire). — RESOLVED.** SPEC defines
+   `Chat` (0x05) `{len,text}` (no sender) and `Event/ChatRelay` (0x0C)
+   `{kind,actor,target,reason}` (no text), so neither frame alone carries
+   both sender and text. The original default — a `ChatRelay` event
+   *immediately followed by* the `Chat` text frame, correlated by the
+   client — was **rejected**: a slot's outbound channel has two producers
+   (the match actor and the net reader's Pong echo), so a `Pong` can
+   split the pair and orphan the attribution. **Resolution: a single
+   self-attributing `Chat` frame** — `C→S [u8 len][text]`,
+   `S→C [u32 sender][u8 len][text]` (§7.2). One frame is atomic and
+   immune to interleaving/backpressure. `schemaChecksum` is unchanged:
+   the descriptor's canonical `Chat` shape (what the client emits) is
+   untouched; the S→C sender prefix is a server→client relay convention
+   the in-repo client mirrors. Alternatives considered and rejected:
+   (a) route the Pong echo through the actor so the two-frame pair becomes
+   atomic — adds risk to the latency-sensitive ping path and stays
+   fragile to any future third producer; (b) add a first-class
+   `ChatRelay` frame and bump `schemaChecksum` — cleanest protocol
+   hygiene but breaks the frozen-checksum invariant (DoD #2). **v1.1
+   note:** if full schema coverage of direction-specific payloads is
+   later desired, fold the S→C sender prefix into the descriptor under a
+   protocol-version bump (regenerating the checksum goldens + TS mirror).
 6. **Minimap scope.** Default: full maze outline + only AOI-visible
    entities (the client only has AOI entities). Fog beyond AOI implicit.
 7. **Modern-preset turbo key.** SPEC §3.10.2 says Shift; default binds
