@@ -3,9 +3,12 @@
 BIN := isnipes
 
 # PHASE8.md §10 — production build: web bundle → embed → single binary.
-# npm ci (lockfile-pinned, no install fallback) keeps the build reproducible;
-# the dist is cleared before copy so a stale/renamed chunk can't linger.
+# npm ci (lockfile-pinned, no install fallback) keeps the build reproducible.
+# BOTH output dirs are wiped before (re)building so no stale/obsolete file
+# (e.g. a retired chunk left in web/dist) can be embedded and then served
+# at / from the binary.
 build:
+	rm -rf web/dist
 	npm -C web ci
 	npm -C web run build
 	@mkdir -p cmd/isnipes/dist
