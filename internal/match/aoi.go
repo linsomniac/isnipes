@@ -7,12 +7,14 @@ import (
 	"github.com/jafo/isnipes/internal/sim"
 )
 
-// Phase 5 §11 — AOI selection bands (in tiles).
+// Phase 5 §11 — AOI selection bands (in tiles). MAZE_REVAMP.md §3.3 scales
+// these tile-denominated radii ×2 with the finer 120×80 grid so the on-screen
+// view covers the same relative area.
 const (
-	AOIInnerProj          = 10 // §5.3.1 priority 4
-	AOIInnerSnipeGen      = 20 // §5.3.1 priorities 5 & 6
-	AOIHysteresisProj     = 12 // outer band for hysteresis
-	AOIHysteresisSnipeGen = 22 // outer band for hysteresis
+	AOIInnerProj          = 20 // §5.3.1 priority 4
+	AOIInnerSnipeGen      = 40 // §5.3.1 priorities 5 & 6
+	AOIHysteresisProj     = 24 // outer band for hysteresis
+	AOIHysteresisSnipeGen = 44 // outer band for hysteresis
 	AOIMaxEntries         = 64 // §5.3
 	subtilesPerTile       = 256
 )

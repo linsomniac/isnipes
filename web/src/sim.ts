@@ -8,14 +8,14 @@
 // oracle; both sides parity-test against it.
 
 export const SUBTILE_PER_TILE = 256;
-export const PLAYER_SPEED = 16;
-export const PLAYER_TURBO_SPEED = 32;
-export const PLAYER_HALF_EXT = 96;
+export const PLAYER_SPEED = 32;
+export const PLAYER_TURBO_SPEED = 64;
+export const PLAYER_HALF_EXT = 256;
 export const FIRE_COOLDOWN_TICKS = 6;
-export const PROJECTILE_SPEED = 32;
+export const PROJECTILE_SPEED = 64;
 export const PROJECTILE_LIFETIME = 90;
-export const GENERATOR_HALF_EXT = 112;
-export const PROJECTILE_HALF_EXT = 24;
+export const GENERATOR_HALF_EXT = 256;
+export const PROJECTILE_HALF_EXT = 48;
 
 // Dir8 enum mirrors §4.3.2 of SPEC.md.
 export const Dir = {

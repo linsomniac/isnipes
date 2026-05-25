@@ -13,9 +13,9 @@ export const PACKING_2BIT = 1;
 // maxMapWidth / minMapHeight..maxMapHeight). MapInit carries width/height
 // as unrestricted u16; a hostile frame could otherwise force a huge
 // allocation, so we reject out-of-range dimensions before allocating.
-export const MIN_MAP_WIDTH = 30;
+export const MIN_MAP_WIDTH = 50;
 export const MAX_MAP_WIDTH = 120;
-export const MIN_MAP_HEIGHT = 20;
+export const MIN_MAP_HEIGHT = 40;
 export const MAX_MAP_HEIGHT = 80;
 
 // unpackTiles decodes `packed` (packing=1) into a flat Uint8Array of

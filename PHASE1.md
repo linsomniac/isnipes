@@ -370,6 +370,13 @@ during a tick; it is only looked up by key.)
 
 ## 7. Maze generation
 
+> **Superseded by [`MAZE_REVAMP.md`](MAZE_REVAMP.md) (2026-05).** `internal/sim/maze.go`
+> no longer uses the growing-tree + rooms + doorways pipeline described in this
+> section. It now carves a **wide-corridor braided maze** on a coarse cell grid
+> (6-tile corridors, 1-tile walls), with cell-based generator/spawn placement and
+> rescaled entity sizes/speeds/distances. See `MAZE_REVAMP.md §2` for the current
+> generator; this section is retained for history.
+
 ### 7.0 Phase 1 defaults
 
 Phase 1 hard-codes the parameter set that Phase 3 will pull from the

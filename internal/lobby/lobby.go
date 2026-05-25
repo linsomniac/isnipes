@@ -569,8 +569,8 @@ func (l *Lobby) handleStartMatch(s *Session, sm proto.StartMatch) {
 	mc := match.MatchConfig{
 		MatchID:     matchID,
 		MapSeed:     mapSeed,
-		MapWidth:    60,
-		MapHeight:   40,
+		MapWidth:    120, // MAZE_REVAMP.md: wide-corridor maze default
+		MapHeight:   80,
 		PlayerSlots: pending,
 		LevelLetter: levelLetter,
 		LevelNumber: levelNumber,

@@ -127,42 +127,53 @@ type Config struct {
 }
 
 // §7.0 phase-1 fixed parameters.
+//
+// MAZE_REVAMP.md: the maze is a wide-corridor braided maze on a 120×80
+// default grid. Corridors are corridorWidth tiles wide separated by 1-tile
+// walls, and entity sizes/speeds + tile-denominated distances are scaled so
+// the player spans ~2 tiles (and is ~2× a snipe), making a 1-tile wall render
+// thin against a wide corridor — the original Snipes look.
 const (
 	subtilePerTile = 256
 
-	defaultWidth  = 60
-	defaultHeight = 40
+	defaultWidth  = 120
+	defaultHeight = 80
+
+	// corridorWidth is the floor width (in tiles) of a maze corridor; the
+	// coarse-cell pitch is corridorWidth+1 (corridor + one thin wall).
+	corridorWidth = 6
 
 	maxInFlightProjectiles = 64
 	playerHP               = 1
 	generatorHP            = 3
-	playerSpeed            = 16
-	playerTurboSpeed       = 32
-	projectileSpeed        = 32
+	playerSpeed            = 32
+	playerTurboSpeed       = 64
+	projectileSpeed        = 64
 	projectileLifetime     = 90
 	fireCooldownTicks      = 6
 	respawnTimerTicks      = 90
 
-	playerHalfExt     = 96
-	generatorHalfExt  = 112
-	projectileHalfExt = 24
+	playerHalfExt     = 256
+	generatorHalfExt  = 256
+	projectileHalfExt = 48
 
 	maxEntities = 256
 
-	minMapWidth  = 30
+	minMapWidth  = 50
 	maxMapWidth  = 120
-	minMapHeight = 20
+	minMapHeight = 40
 	maxMapHeight = 80
 
 	maxPlayers = 8
 )
 
-// AIDEV-NOTE: build-time hitbox-fits-corridor assertion (§15 risk). A
-// future bump above 112 would no longer fit a 1-tile corridor.
+// AIDEV-NOTE: build-time hitbox-fits-corridor assertion. The wide-corridor
+// maze (MAZE_REVAMP.md) makes corridors corridorWidth tiles wide; the player
+// half-extent must fit within a corridor's half-width with clearance to spare.
 func init() {
-	const corridorClearancePerSide = subtilePerTile/2 - playerHalfExt
+	const corridorClearancePerSide = corridorWidth*subtilePerTile/2 - playerHalfExt
 	if corridorClearancePerSide < 0 {
-		panic("isnipes/sim: playerHalfExt exceeds tile half-width")
+		panic("isnipes/sim: playerHalfExt exceeds corridor half-width")
 	}
 }
 
@@ -173,7 +184,7 @@ var (
 	ErrZeroPlayerID       = errors.New("isnipes/sim: Config.PlayerIDs contains 0 (reserved sentinel)")
 	ErrDuplicatePlayerID  = errors.New("isnipes/sim: Config.PlayerIDs contains duplicates")
 	ErrPlayerIDNoHeadroom = errors.New("isnipes/sim: Config.PlayerIDs exceeds the §8 headroom bound")
-	ErrInvalidMapSize     = errors.New("isnipes/sim: Config.Width/Height outside [30..120] × [20..80]")
+	ErrInvalidMapSize     = errors.New("isnipes/sim: Config.Width/Height outside [50..120] × [40..80]")
 	ErrInvalidLevel       = errors.New("isnipes/sim: Config.LevelLetter / LevelNumber out of range or only one set")
 )
 

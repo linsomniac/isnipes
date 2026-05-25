@@ -94,6 +94,19 @@ export function colorForKind(kind: number, palette: Palette): string {
   }
 }
 
+// radiusForKind sizes an entity's circle to match its sim hitbox half-extent
+// (MAZE_REVAMP.md §4), as a fraction of a tile: player/generator span ~2 tiles
+// (halfExt 256 = 1.0 tile radius), a snipe ~1 tile (halfExt 128 = 0.5), and a
+// projectile is small (halfExt 48 ≈ 0.1875). So the player draws ≈ 2× a snipe.
+export function radiusForKind(kind: number): number {
+  switch (kind) {
+    case 2: return TILE_PX * 1.0; // generator
+    case 3: return TILE_PX * 0.1875; // projectile
+    case 4: return TILE_PX * 0.5; // snipe
+    default: return TILE_PX * 1.0; // player / self
+  }
+}
+
 // buildDrawList merges self + non-self entities into one ascending-y draw
 // order (DoD #7 invariant applies to the local player too). Self is
 // colored with palette.self and, on a y-tie, sorts after a co-located
@@ -232,14 +245,14 @@ export class Renderer {
     }
   }
 
-  private drawEntity(cam: Camera, wx: number, wy: number, _kind: number, color: string): void {
+  private drawEntity(cam: Camera, wx: number, wy: number, kind: number, color: string): void {
     const [px, py] = worldToScreen(cam, wx, wy);
     const ctx = this.ctx;
     ctx.fillStyle = color;
     ctx.strokeStyle = this.palette.bg;
     ctx.lineWidth = this.palette.outlineWidth;
     ctx.beginPath();
-    ctx.arc(px, py, TILE_PX * 0.4, 0, Math.PI * 2);
+    ctx.arc(px, py, radiusForKind(kind), 0, Math.PI * 2);
     ctx.closePath();
     ctx.fill();
     ctx.stroke();

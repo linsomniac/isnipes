@@ -13,7 +13,7 @@ func firstEventOfKind(evs []Event, kind uint8, target EntityID) (Event, bool) {
 	return Event{}, false
 }
 
-func TestProjectileTravelsAtSpeed32(t *testing.T) {
+func TestProjectileTravelsAtProjectileSpeed(t *testing.T) {
 	s := newFixtureSim(t)
 	cx := int32(10*subtilePerTile + subtilePerTile/2)
 	cy := int32(20*subtilePerTile + subtilePerTile/2)
@@ -26,7 +26,7 @@ func TestProjectileTravelsAtSpeed32(t *testing.T) {
 	}
 	projID := projs[0]
 	startEnt, _ := EntityRawForTest(s, projID)
-	// Tick 8 more ticks; projectile moves 8*32=256 subtiles in X.
+	// Tick 8 more ticks; projectile moves 8*projectileSpeed subtiles in X.
 	for i := 0; i < 8; i++ {
 		_, _ = s.Tick(nil)
 	}
@@ -35,7 +35,7 @@ func TestProjectileTravelsAtSpeed32(t *testing.T) {
 		t.Fatalf("projectile despawned early")
 	}
 	dx := endEnt.X - startEnt.X
-	want := int32(8 * 32)
+	want := int32(8 * projectileSpeed)
 	if dx != want {
 		t.Fatalf("dx = %d, want %d", dx, want)
 	}
@@ -60,8 +60,7 @@ func TestProjectileHitsWallAtExpectedTick(t *testing.T) {
 	_, _ = s.Tick([]PlayerInput{{PlayerID: 1, FireDir: DirE}})
 	startTick := s.ServerTick()
 	projID := LiveProjectileIDsForTest(s)[0]
-	// Expected impact tick: ceil((5*256 - 24) / 32) = ceil(1256/32) = 40 motion
-	// ticks from fire tick. So at startTick + 40 we should see the event.
+	// At projectileSpeed=64 the impact tick roughly halves vs. the old speed.
 	var killTick int32 = -1
 	for i := 0; i < 100; i++ {
 		evs, _ := s.Tick(nil)
@@ -74,12 +73,10 @@ func TestProjectileHitsWallAtExpectedTick(t *testing.T) {
 		t.Fatalf("no kill event for projectile")
 	}
 	delta := killTick - int32(startTick)
-	// The spec's "≈40 ticks ±1" math assumes player at tile boundary;
-	// our default placement uses tile centre (offset by 128 subtiles).
-	// Adjusted expectation: ceil((5*256 - 128 - 24) / 32) = ceil(1128/32) = 36
-	// for centre-placed player + spawn-then-motion ordering.
-	if delta < 35 || delta > 41 {
-		t.Fatalf("kill at startTick+%d, want 35..41", delta)
+	// Centre-placed player + spawn-then-motion ordering at the doubled speed
+	// lands the wall impact ~18 motion ticks out; allow a small band.
+	if delta < 15 || delta > 22 {
+		t.Fatalf("kill at startTick+%d, want 15..22", delta)
 	}
 }
 
@@ -104,7 +101,8 @@ func TestProjectileHitsEntityHeadOn(t *testing.T) {
 	// Fire E from player 1.
 	_, _ = s.Tick([]PlayerInput{{PlayerID: 1, FireDir: DirE}})
 	fireTick := s.ServerTick()
-	// Expected: 37 motion ticks after spawn → event on fireTick + 37.
+	// At the doubled speed (and the wider 2-tile player-2 hitbox) the head-on
+	// impact lands ~16 motion ticks out; allow a small band.
 	var hitTick uint32 = 0
 	for i := 0; i < 100; i++ {
 		evs, _ := s.Tick(nil)
@@ -117,8 +115,8 @@ func TestProjectileHitsEntityHeadOn(t *testing.T) {
 		t.Fatalf("no hit event for player 2")
 	}
 	delta := int(hitTick) - int(fireTick)
-	if delta < 36 || delta > 38 {
-		t.Fatalf("hit at fire+%d, want ~37", delta)
+	if delta < 13 || delta > 20 {
+		t.Fatalf("hit at fire+%d, want ~16", delta)
 	}
 }
 
@@ -128,7 +126,10 @@ func TestProjectileExpiresAfter90Ticks(t *testing.T) {
 	W, H := s.Width(), s.Height()
 	OverrideMazeForTest(s, W, H, allFloorMaze(W, H))
 	PlacePlayerForTest(s, 1, int32(10*subtilePerTile+subtilePerTile/2), int32(20*subtilePerTile+subtilePerTile/2))
-	_, _ = s.Tick([]PlayerInput{{PlayerID: 1, FireDir: DirN}})
+	// Fire E: at projectileSpeed=64 a 90-tick flight covers ~22.5 tiles, which
+	// needs the 60-wide map's horizontal runway (N/S would hit the 40-tall
+	// map's wall first).
+	_, _ = s.Tick([]PlayerInput{{PlayerID: 1, FireDir: DirE}})
 	fireTick := s.ServerTick()
 	projID := LiveProjectileIDsForTest(s)[0]
 	var expiryTick uint32
@@ -321,7 +322,10 @@ func TestProjectileGetsFull90MotionTicks(t *testing.T) {
 	W, H := s.Width(), s.Height()
 	OverrideMazeForTest(s, W, H, allFloorMaze(W, H))
 	PlacePlayerForTest(s, 1, int32(10*subtilePerTile+subtilePerTile/2), int32(20*subtilePerTile+subtilePerTile/2))
-	_, _ = s.Tick([]PlayerInput{{PlayerID: 1, FireDir: DirN}})
+	// Fire E: at projectileSpeed=64 a 90-tick flight covers ~22.5 tiles, which
+	// needs the 60-wide map's horizontal runway (N/S would hit the 40-tall
+	// map's wall first).
+	_, _ = s.Tick([]PlayerInput{{PlayerID: 1, FireDir: DirE}})
 	fireTick := s.ServerTick()
 	projID := LiveProjectileIDsForTest(s)[0]
 	for i := 0; i < 95; i++ {

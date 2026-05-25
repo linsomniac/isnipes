@@ -1,10 +1,10 @@
 isnipes-physics/v1
 subtile_per_tile=256
-player_speed=16
-player_turbo_speed=32
-player_half_ext=96
+player_speed=32
+player_turbo_speed=64
+player_half_ext=256
 fire_cooldown_ticks=6
-projectile_speed=32
+projectile_speed=64
 projectile_lifetime=90
-generator_half_ext=112
-projectile_half_ext=24
+generator_half_ext=256
+projectile_half_ext=48

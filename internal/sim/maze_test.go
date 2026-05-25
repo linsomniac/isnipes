@@ -140,128 +140,87 @@ func TestMazeOuterWall(t *testing.T) {
 	}
 }
 
+// spawnSeparationFloors are the MAZE_REVAMP.md §2.2 cell-based separation
+// guarantees (spawns/generators sit at cell centres, pitch mazePitch):
+//
+//	spawn↔spawn ≥ spawnCellGap cells, gen↔gen ≥ genCellGap cells, and
+//	spawn↔gen ≥ 1 cell (the relaxed small-map fallback; larger on roomy maps).
+const (
+	spawnSpawnMinTiles = spawnCellGap * mazePitch
+	genGenMinTiles     = genCellGap * mazePitch
+	spawnGenMinTiles   = mazePitch
+)
+
+func assertSpawnSeparation(t *testing.T, seed uint32, spawns, gens []tilePos) {
+	t.Helper()
+	for i := range spawns {
+		for j := i + 1; j < len(spawns); j++ {
+			if d := chebyshev(spawns[i], spawns[j]); d < spawnSpawnMinTiles {
+				t.Fatalf("seed %#x: spawns too close: %v %v d=%d", seed, spawns[i], spawns[j], d)
+			}
+		}
+		for _, g := range gens {
+			if d := chebyshev(spawns[i], g); d < spawnGenMinTiles {
+				t.Fatalf("seed %#x: spawn vs gen too close: d=%d", seed, d)
+			}
+		}
+	}
+	for i := range gens {
+		for j := i + 1; j < len(gens); j++ {
+			if d := chebyshev(gens[i], gens[j]); d < genGenMinTiles {
+				t.Fatalf("seed %#x: gens too close: d=%d", seed, d)
+			}
+		}
+	}
+}
+
+func collectSpawnsGens(W, H int, at func(x, y int) Tile) (spawns, gens []tilePos) {
+	for y := 0; y < H; y++ {
+		for x := 0; x < W; x++ {
+			switch at(x, y) {
+			case TileSpawnPlayer:
+				spawns = append(spawns, tilePos{x, y})
+			case TileSpawnGenerator:
+				gens = append(gens, tilePos{x, y})
+			}
+		}
+	}
+	return spawns, gens
+}
+
 func TestMazeSpawnSeparation(t *testing.T) {
-	// §13.3 strict invariants — relaxed per phase-loop-notes: the §7.7
-	// algorithm permits fallback to ≥10 separation when strict ≥15
-	// cannot yield enough candidates; the spec text overstates the
-	// "comfortably large enough" guarantee. We assert the
-	// algorithmic floor (≥10 spawn-vs-spawn, ≥10 spawn-vs-generator,
-	// ≥12 gen-vs-gen) and additionally check that the strict ≥15
-	// path holds for the OVERWHELMING majority of seeds.
-	strictPasses := 0
-	const total = 50
-	for i := uint32(1); i <= total; i++ {
+	for i := uint32(1); i <= 50; i++ {
 		seed := i * 0x9E3779B1
-		cfg := referenceConfig(seed)
-		s, err := NewSim(cfg)
+		s, err := NewSim(referenceConfig(seed))
 		if err != nil {
 			t.Fatalf("seed %#x: %v", seed, err)
 		}
 		W, H, at := MazeForTest(s)
-		var spawns, gens []tilePos
-		for y := 0; y < H; y++ {
-			for x := 0; x < W; x++ {
-				switch at(x, y) {
-				case TileSpawnPlayer:
-					spawns = append(spawns, tilePos{x, y})
-				case TileSpawnGenerator:
-					gens = append(gens, tilePos{x, y})
-				}
-			}
-		}
-		strict := true
-		for i := range spawns {
-			for j := i + 1; j < len(spawns); j++ {
-				d := chebyshev(spawns[i], spawns[j])
-				if d < 10 {
-					t.Fatalf("seed %#x: spawns too close: %v %v d=%d", seed, spawns[i], spawns[j], d)
-				}
-				if d < 15 {
-					strict = false
-				}
-			}
-			for _, g := range gens {
-				d := chebyshev(spawns[i], g)
-				if d < 10 {
-					t.Fatalf("seed %#x: spawn vs gen too close: d=%d", seed, d)
-				}
-				if d < 15 {
-					strict = false
-				}
-			}
-		}
-		for i := range gens {
-			for j := i + 1; j < len(gens); j++ {
-				if d := chebyshev(gens[i], gens[j]); d < 12 {
-					t.Fatalf("seed %#x: gens too close: d=%d", seed, d)
-				}
-			}
-		}
-		if strict {
-			strictPasses++
-		}
+		spawns, gens := collectSpawnsGens(W, H, at)
+		assertSpawnSeparation(t, seed, spawns, gens)
 	}
-	_ = strictPasses // observational only; the spec's "comfortably large"
-	// claim about the default map is overly optimistic given the
-	// Poisson-disk generator distribution. We accept the ≥10 algorithmic
-	// floor as the load-bearing invariant.
 }
 
 func TestMazeSpawnSeparationSmallMap(t *testing.T) {
-	// §13.3 small-map test: exercises the fallback ≥10 invariant.
-	// Adjusted from the spec's 30×20/8 to 50×30/6 because the
-	// shuffle-and-greedy algorithm cannot reliably pack 8 spawns
-	// onto the minimum map perimeter when generators block 1-2 sides
-	// (see scratchpad — Spec issues). 50×30 is in the small-map
-	// envelope and routinely triggers the ≥10 fallback.
+	// Minimum-size map (MAZE_REVAMP.md D2): exercises the relaxed spawn↔gen
+	// fallback, where the perimeter hugs the interior generators.
 	for i := uint32(1); i <= 30; i++ {
 		seed := i * 0x9E3779B1
 		cfg := Config{
 			Seed:      seed,
-			Width:     50,
-			Height:    30,
+			Width:     minMapWidth,
+			Height:    minMapHeight,
 			PlayerIDs: []EntityID{1, 2, 3, 4, 5, 6},
 		}
 		s, err := NewSim(cfg)
 		if err != nil {
-			// The shuffle-and-greedy algorithm can fail on adversarial
-			// seeds even within the fallback budget; skip those seeds
-			// rather than failing the test. The non-skipped cases
-			// still validate the relaxed invariants.
+			// Adversarial seeds can exhaust the retry budget on the minimum
+			// map; skip rather than fail. Non-skipped cases still validate.
 			continue
 		}
 		W, H, at := MazeForTest(s)
-		var spawns, gens []tilePos
-		for y := 0; y < H; y++ {
-			for x := 0; x < W; x++ {
-				switch at(x, y) {
-				case TileSpawnPlayer:
-					spawns = append(spawns, tilePos{x, y})
-				case TileSpawnGenerator:
-					gens = append(gens, tilePos{x, y})
-				}
-			}
-		}
-		// Relaxed: spawn-vs-spawn and spawn-vs-gen ≥ 10; gen-vs-gen ≥ 12.
-		for i := range spawns {
-			for j := i + 1; j < len(spawns); j++ {
-				if d := chebyshev(spawns[i], spawns[j]); d < 10 {
-					t.Fatalf("seed %#x: spawn pair d=%d", seed, d)
-				}
-			}
-			for _, g := range gens {
-				if d := chebyshev(spawns[i], g); d < 10 {
-					t.Fatalf("seed %#x: spawn vs gen d=%d", seed, d)
-				}
-			}
-		}
-		for i := range gens {
-			for j := i + 1; j < len(gens); j++ {
-				if d := chebyshev(gens[i], gens[j]); d < 12 {
-					t.Fatalf("seed %#x: gen pair d=%d", seed, d)
-				}
-			}
-		}
+		spawns, gens := collectSpawnsGens(W, H, at)
+		assertSpawnSeparation(t, seed, spawns, gens)
 		if len(spawns) < len(cfg.PlayerIDs) {
 			t.Fatalf("seed %#x: not enough spawns (%d < %d)", seed, len(spawns), len(cfg.PlayerIDs))
 		}
@@ -269,10 +228,11 @@ func TestMazeSpawnSeparationSmallMap(t *testing.T) {
 }
 
 func TestMazeAverageDegree(t *testing.T) {
+	// MAZE_REVAMP.md §5: the wide-corridor maze is a braided spanning maze.
+	// Mean cell degree must exceed a pure spanning tree (~2.0, proving the
+	// braid + chambers add loops) and stay well below a full grid (4.0).
 	const N = 200
 	var sum float64
-	bandLow, bandHigh := 3.1, 3.9
-	inBand := 0
 	for i := uint32(1); i <= N; i++ {
 		seed := i * 0x9E3779B1
 		s, err := NewSim(referenceConfig(seed))
@@ -280,50 +240,43 @@ func TestMazeAverageDegree(t *testing.T) {
 			t.Fatalf("seed %#x: %v", seed, err)
 		}
 		W, H, at := MazeForTest(s)
-		cellCols := (W - 1) / 2
-		cellRows := (H - 1) / 2
-		// degree at (cx, cy) = # of cardinal neighbors connected through
-		// open wall.
-		totalDeg := 0
-		cells := 0
-		for cy := 0; cy < cellRows; cy++ {
-			for cx := 0; cx < cellCols; cx++ {
-				tx := 2*cx + 1
-				ty := 2*cy + 1
-				if at(tx, ty) == TileWall {
-					continue
-				}
+		cellsX := (W - 1) / mazePitch
+		cellsY := (H - 1) / mazePitch
+		linkedDir := func(cx, cy, dx, dy int) bool {
+			ox, oy := cx*mazePitch+1, cy*mazePitch+1
+			switch {
+			case dx == 1:
+				return at(ox+corridorWidth, oy) == TileFloor
+			case dx == -1:
+				return at(ox-1, oy) == TileFloor
+			case dy == 1:
+				return at(ox, oy+corridorWidth) == TileFloor
+			default:
+				return at(ox, oy-1) == TileFloor
+			}
+		}
+		totalDeg, cells := 0, 0
+		for cy := 0; cy < cellsY; cy++ {
+			for cx := 0; cx < cellsX; cx++ {
 				cells++
-				// check each direction
 				for _, d := range [4][2]int{{0, -1}, {1, 0}, {0, 1}, {-1, 0}} {
-					ncx := cx + d[0]
-					ncy := cy + d[1]
-					if ncx < 0 || ncx >= cellCols || ncy < 0 || ncy >= cellRows {
+					ncx, ncy := cx+d[0], cy+d[1]
+					if ncx < 0 || ncx >= cellsX || ncy < 0 || ncy >= cellsY {
 						continue
 					}
-					wallTx := tx + d[0]
-					wallTy := ty + d[1]
-					if at(wallTx, wallTy) != TileWall {
+					if linkedDir(cx, cy, d[0], d[1]) {
 						totalDeg++
 					}
 				}
 			}
 		}
-		if cells == 0 {
-			continue
-		}
-		avg := float64(totalDeg) / float64(cells)
-		sum += avg
-		if avg >= bandLow && avg <= bandHigh {
-			inBand++
+		if cells > 0 {
+			sum += float64(totalDeg) / float64(cells)
 		}
 	}
 	mean := sum / float64(N)
-	if mean < 3.3 || mean > 3.7 {
-		t.Fatalf("mean avg degree %.3f outside [3.3, 3.7]", mean)
-	}
-	if inBand < 95*N/100 {
-		t.Fatalf("only %d/%d in band [%g, %g]", inBand, N, bandLow, bandHigh)
+	if mean <= 2.05 || mean >= 3.5 {
+		t.Fatalf("mean cell degree %.3f outside (2.05, 3.5) — expected a braided maze", mean)
 	}
 }
 

@@ -35,9 +35,24 @@ type generateResult struct {
 
 type tilePos struct{ X, Y int }
 
-// generateMaze runs the whole §7 pipeline with up to 3 retry attempts
-// using the §7.6 seed-perturbation scheme. The retry budget covers
-// §7.4, §7.6 and §7.8 failure paths collectively per §7.4 step 3.
+// cellPos is a coarse-cell coordinate in the wide-corridor maze grid.
+type cellPos struct{ CX, CY int }
+
+// Wide-corridor maze parameters (MAZE_REVAMP.md §2). The maze is carved on a
+// coarse cell grid: each cell is a corridorWidth×corridorWidth floor block and
+// adjacent cells are separated by a 1-tile wall, so the cell pitch is
+// corridorWidth+1. A recursive-backtracker spanning carve is then braided
+// (loops) and a few 2×2 chambers are merged for size variety.
+const (
+	mazePitch     = corridorWidth + 1 // corridor floor + one thin wall
+	mazeBraidPct  = 18                // % of closed inter-cell walls reopened as loops
+	mazeRoomCount = 5                 // 2×2 cell chambers merged for size variety
+	genCellGap    = 2                 // min Chebyshev cell distance between generators
+	spawnCellGap  = 2                 // min Chebyshev cell distance: spawn↔spawn and spawn↔generator
+)
+
+// generateMaze runs the pipeline with up to 3 retry attempts using the §7.6
+// seed-perturbation scheme.
 func generateMaze(cfg Config) (*generateResult, error) {
 	const maxAttempts = 4 // 1 initial + 3 retries
 	var seed uint32 = cfg.Seed
@@ -55,35 +70,29 @@ func generateMaze(cfg Config) (*generateResult, error) {
 	return nil, lastErr
 }
 
-// generateMazeOnce runs one full attempt of the §7 pipeline.
+// generateMazeOnce runs one full attempt of the wide-corridor pipeline. PRNG
+// consumption order is fixed for determinism: carve → braid → chambers →
+// generators → spawns.
 func generateMazeOnce(seed uint32, cfg Config) (*generateResult, error) {
 	pcg := newMazePCG(seed)
 	r := rand.New(pcg)
 	W, H := cfg.Width, cfg.Height
 	m := newMaze(W, H)
-	// All tiles begin as TileWall by zero value.
+	// All tiles begin as TileWall by zero value (incl. the outer ring and any
+	// leftover tiles past the last cell on the far edges).
 
-	// 7.3 growing-tree carving (consumes PRNG first).
-	carveGrowingTree(m, r)
-
-	// 7.4 room carving.
-	if !carveRooms(m, r) {
+	cellsX := (W - 1) / mazePitch
+	cellsY := (H - 1) / mazePitch
+	if cellsX < 2 || cellsY < 2 {
 		return nil, errMazeRetry
 	}
 
-	// 7.5 doorway insertion.
-	insertDoorways(m, r)
+	carveWideMaze(m, r, cellsX, cellsY)
 
-	// 7.7's perimeter band depends on H. §7.0.1 genMargin = perimeterBand+1.
-	perimeterBand := maxInt(3, H/8)
-	genMargin := perimeterBand + 1
-
-	// Generator count formula (§7.0.1).
 	playerCount := len(cfg.PlayerIDs)
-	generatorCount := computeGeneratorCount(playerCount, W, H, perimeterBand, cfg.NoGenerators)
+	generatorCount := computeGeneratorCount(playerCount, W, H, cfg.NoGenerators)
 
-	// 7.6 generator placement.
-	gens, ok := placeGenerators(m, r, genMargin, generatorCount)
+	gens, ok := placeGenerators(r, cellsX, cellsY, generatorCount)
 	if !ok {
 		return nil, errMazeRetry
 	}
@@ -91,8 +100,7 @@ func generateMazeOnce(seed uint32, cfg Config) (*generateResult, error) {
 		m.set(g.X, g.Y, TileSpawnGenerator)
 	}
 
-	// 7.7 player spawn placement.
-	playerSpawns, extras, ok := placePlayerSpawns(m, r, perimeterBand, playerCount, gens)
+	playerSpawns, extras, ok := placePlayerSpawns(r, cellsX, cellsY, playerCount, gens)
 	if !ok {
 		return nil, errMazeRetry
 	}
@@ -103,7 +111,6 @@ func generateMazeOnce(seed uint32, cfg Config) (*generateResult, error) {
 		m.set(s.X, s.Y, TileSpawnPlayer)
 	}
 
-	// 7.8 connectivity validation.
 	if !connectivityOK(m, playerSpawns) {
 		return nil, errMazeRetry
 	}
@@ -123,268 +130,271 @@ func (retryErr) Error() string { return "isnipes/sim: maze retry" }
 
 var errMazeRetry error = retryErr{}
 
-// computeGeneratorCount implements the §7.0.1 formula.
-func computeGeneratorCount(playerCount, W, H, perimeterBand int, noGen bool) int {
+// computeGeneratorCount derives the generator count from the interior cell
+// count (MAZE_REVAMP.md §2.1), capped so Poisson-disk placement at genCellGap
+// can satisfy it.
+func computeGeneratorCount(playerCount, W, H int, noGen bool) int {
 	if noGen {
 		return 0
 	}
-	genMargin := perimeterBand + 1
-	gInteriorW := maxInt(0, W-2*genMargin)
-	gInteriorH := maxInt(0, H-2*genMargin)
-	genInterior := gInteriorW * gInteriorH
-	generatorCap := maxInt(2, genInterior/144)
+	cellsX := (W - 1) / mazePitch
+	cellsY := (H - 1) / mazePitch
+	interiorCells := maxInt(0, cellsX-2) * maxInt(0, cellsY-2)
+	genCap := maxInt(2, interiorCells/4)
 	naive := maxInt(2, playerCount) + 1
-	return maxInt(2, minInt(naive, generatorCap))
+	return maxInt(2, minInt(naive, genCap))
 }
 
-func carveGrowingTree(m *maze, r *rand.Rand) {
-	W, H := m.W, m.H
-	cellCols := (W - 1) / 2
-	cellRows := (H - 1) / 2
+// --- cell ↔ tile helpers ---
 
-	// Mark the start cell as floor; push onto frontier.
-	startX, startY := 1, 1
-	m.set(startX, startY, TileFloor)
-	type cell struct{ cx, cy int }
-	frontier := make([]cell, 0, cellCols*cellRows)
-	frontier = append(frontier, cell{0, 0})
+// cellOrigin returns the top-left FLOOR tile of a cell's corridor block.
+func cellOrigin(c cellPos) (int, int) {
+	return c.CX*mazePitch + 1, c.CY*mazePitch + 1
+}
 
-	// Neighbor offsets fixed as [N, E, S, W] per §7.3.
-	type dxy struct{ dx, dy int }
-	nbrs := [4]dxy{{0, -1}, {1, 0}, {0, 1}, {-1, 0}}
+// cellCenter returns the tile at the centre of a cell (always FLOOR after
+// carving) — where a generator/spawn marker is placed.
+func cellCenter(c cellPos) tilePos {
+	ox, oy := cellOrigin(c)
+	return tilePos{ox + corridorWidth/2, oy + corridorWidth/2}
+}
 
-	for len(frontier) > 0 {
-		fr := r.Float64()
-		var idx int
-		if fr < 0.6 {
-			idx = len(frontier) - 1
-		} else {
-			idx = r.IntN(len(frontier))
+// tileToCell maps a cell-centre tile back to its cell coordinate.
+func tileToCell(t tilePos) cellPos {
+	return cellPos{(t.X - 1) / mazePitch, (t.Y - 1) / mazePitch}
+}
+
+// carveCell fills a cell's corridorWidth×corridorWidth block with floor.
+func carveCell(m *maze, c cellPos) {
+	ox, oy := cellOrigin(c)
+	for yy := 0; yy < corridorWidth; yy++ {
+		for xx := 0; xx < corridorWidth; xx++ {
+			m.set(ox+xx, oy+yy, TileFloor)
 		}
-		c := frontier[idx]
-		// Filter cells still walled in.
-		var candidates [4]int
-		nc := 0
-		for i, n := range nbrs {
-			ncx := c.cx + n.dx
-			ncy := c.cy + n.dy
-			if ncx < 0 || ncx >= cellCols || ncy < 0 || ncy >= cellRows {
-				continue
-			}
-			tx := 2*ncx + 1
-			ty := 2*ncy + 1
-			if m.at(tx, ty) == TileWall {
-				candidates[nc] = i
-				nc++
+	}
+}
+
+// carveLink opens the 1-tile wall strip between two orthogonally adjacent
+// cells (a is the reference; b is N/E/S/W of it).
+func carveLink(m *maze, a, b cellPos) {
+	ax, ay := cellOrigin(a)
+	switch {
+	case b.CX == a.CX+1:
+		for k := 0; k < corridorWidth; k++ {
+			m.set(ax+corridorWidth, ay+k, TileFloor)
+		}
+	case b.CX == a.CX-1:
+		for k := 0; k < corridorWidth; k++ {
+			m.set(ax-1, ay+k, TileFloor)
+		}
+	case b.CY == a.CY+1:
+		for k := 0; k < corridorWidth; k++ {
+			m.set(ax+k, ay+corridorWidth, TileFloor)
+		}
+	case b.CY == a.CY-1:
+		for k := 0; k < corridorWidth; k++ {
+			m.set(ax+k, ay-1, TileFloor)
+		}
+	}
+}
+
+// linked reports whether the wall strip between a and adjacent b is open.
+func linked(m *maze, a, b cellPos) bool {
+	ax, ay := cellOrigin(a)
+	switch {
+	case b.CX == a.CX+1:
+		return m.at(ax+corridorWidth, ay) == TileFloor
+	case b.CX == a.CX-1:
+		return m.at(ax-1, ay) == TileFloor
+	case b.CY == a.CY+1:
+		return m.at(ax, ay+corridorWidth) == TileFloor
+	default:
+		return m.at(ax, ay-1) == TileFloor
+	}
+}
+
+var cellDirs = [4]cellPos{{0, -1}, {1, 0}, {0, 1}, {-1, 0}}
+
+// carveWideMaze carves a recursive-backtracker spanning maze over the cell
+// grid, then braids in loops and merges a few chambers. The outer ring and
+// every inter-cell wall stay exactly 1 tile thick.
+func carveWideMaze(m *maze, r *rand.Rand, cellsX, cellsY int) {
+	inb := func(c cellPos) bool { return c.CX >= 0 && c.CY >= 0 && c.CX < cellsX && c.CY < cellsY }
+	visited := make([]bool, cellsX*cellsY)
+	idx := func(c cellPos) int { return c.CY*cellsX + c.CX }
+
+	// Recursive backtracker (explicit stack) from a PRNG-chosen start cell.
+	start := cellPos{r.IntN(cellsX), r.IntN(cellsY)}
+	visited[idx(start)] = true
+	carveCell(m, start)
+	stack := []cellPos{start}
+	for len(stack) > 0 {
+		cur := stack[len(stack)-1]
+		var nbrs []cellPos
+		for _, d := range cellDirs {
+			n := cellPos{cur.CX + d.CX, cur.CY + d.CY}
+			if inb(n) && !visited[idx(n)] {
+				nbrs = append(nbrs, n)
 			}
 		}
-		if nc == 0 {
-			// Swap-with-last and pop.
-			frontier[idx] = frontier[len(frontier)-1]
-			frontier = frontier[:len(frontier)-1]
+		if len(nbrs) == 0 {
+			stack = stack[:len(stack)-1]
 			continue
 		}
-		pick := candidates[r.IntN(nc)]
-		n := nbrs[pick]
-		ncx := c.cx + n.dx
-		ncy := c.cy + n.dy
-		ntx := 2*ncx + 1
-		nty := 2*ncy + 1
-		wallTx := 2*c.cx + 1 + n.dx
-		wallTy := 2*c.cy + 1 + n.dy
-		m.set(ntx, nty, TileFloor)
-		m.set(wallTx, wallTy, TileFloor)
-		frontier = append(frontier, cell{ncx, ncy})
+		pick := nbrs[r.IntN(len(nbrs))]
+		visited[idx(pick)] = true
+		carveCell(m, pick)
+		carveLink(m, cur, pick)
+		stack = append(stack, pick)
 	}
-}
 
-func carveRooms(m *maze, r *rand.Rand) bool {
-	W, H := m.W, m.H
-	roomCount := 5 + r.IntN(6) // 5..10
-	type rect struct{ x, y, w, h int }
-	accepted := make([]rect, 0, roomCount)
-	attemptBudget := 64 * roomCount
-	for attempt := 0; attempt < attemptBudget && len(accepted) < roomCount; attempt++ {
-		w := 4 + r.IntN(5) // 4..8
-		h := 4 + r.IntN(5)
-		rx := 2 + r.IntN(W-2-w-1) // [2, W-2-w]
-		ry := 2 + r.IntN(H-2-h-1)
-		cand := rect{rx, ry, w, h}
-		// Reject if overlaps any accepted room (1-tile margin).
-		bad := false
-		for _, ar := range accepted {
-			if rectsOverlapWithMargin(cand, ar, 1) {
-				bad = true
-				break
-			}
-		}
-		if bad {
-			continue
-		}
-		// Carve.
-		for yy := cand.y; yy < cand.y+cand.h; yy++ {
-			for xx := cand.x; xx < cand.x+cand.w; xx++ {
-				m.set(xx, yy, TileFloor)
-			}
-		}
-		accepted = append(accepted, cand)
-	}
-	return len(accepted) >= 5
-}
-
-func rectsOverlapWithMargin(a, b struct{ x, y, w, h int }, margin int) bool {
-	if a.x+a.w+margin <= b.x {
-		return false
-	}
-	if b.x+b.w+margin <= a.x {
-		return false
-	}
-	if a.y+a.h+margin <= b.y {
-		return false
-	}
-	if b.y+b.h+margin <= a.y {
-		return false
-	}
-	return true
-}
-
-func insertDoorways(m *maze, r *rand.Rand) {
-	const pDoor = 0.75
-	W, H := m.W, m.H
-	for ty := 1; ty < H-1; ty++ {
-		for tx := 1; tx < W-1; tx++ {
-			// We need this tile to be a wall on an even coordinate
-			// (horizontal even, or vertical even — at most one of
-			// (tx, ty) is even for a "wall between cells" tile).
-			if m.at(tx, ty) != TileWall {
-				continue
-			}
-			even := false
-			if tx%2 == 0 && ty%2 == 1 {
-				// Vertical wall between (tx-1, ty) and (tx+1, ty).
-				if m.at(tx-1, ty) == TileFloor && m.at(tx+1, ty) == TileFloor {
-					even = true
-				}
-			} else if ty%2 == 0 && tx%2 == 1 {
-				// Horizontal wall between (tx, ty-1) and (tx, ty+1).
-				if m.at(tx, ty-1) == TileFloor && m.at(tx, ty+1) == TileFloor {
-					even = true
+	// Braid: reopen a fraction of still-closed E/S walls to create loops so
+	// the maze is multiply-connected (escape routes), not a pure tree.
+	for cy := 0; cy < cellsY; cy++ {
+		for cx := 0; cx < cellsX; cx++ {
+			a := cellPos{cx, cy}
+			for _, b := range []cellPos{{cx + 1, cy}, {cx, cy + 1}} {
+				if inb(b) && !linked(m, a, b) && r.IntN(100) < mazeBraidPct {
+					carveLink(m, a, b)
 				}
 			}
-			if !even {
-				continue
-			}
-			if r.Float64() < pDoor {
-				m.set(tx, ty, TileFloor)
-			}
 		}
+	}
+
+	// Chambers: merge a few 2×2 cell blocks into open rooms / nests.
+	for i := 0; i < mazeRoomCount; i++ {
+		cx := r.IntN(cellsX - 1)
+		cy := r.IntN(cellsY - 1)
+		tl := cellPos{cx, cy}
+		tr := cellPos{cx + 1, cy}
+		bl := cellPos{cx, cy + 1}
+		br := cellPos{cx + 1, cy + 1}
+		for _, c := range []cellPos{tl, tr, bl, br} {
+			carveCell(m, c)
+		}
+		carveLink(m, tl, tr)
+		carveLink(m, bl, br)
+		carveLink(m, tl, bl)
+		carveLink(m, tr, br)
 	}
 }
 
-// placeGenerators implements §7.6 with the Chebyshev ≥ 12 rule.
-func placeGenerators(m *maze, r *rand.Rand, genMargin, generatorCount int) ([]tilePos, bool) {
-	if generatorCount == 0 {
+// placeGenerators chooses interior cells ≥ genCellGap apart (Chebyshev in cell
+// coords) and returns their centre tiles (MAZE_REVAMP.md §2.1).
+func placeGenerators(r *rand.Rand, cellsX, cellsY, count int) ([]tilePos, bool) {
+	if count == 0 {
 		return nil, true
 	}
-	W, H := m.W, m.H
-	candidates := make([]tilePos, 0, 256)
-	for ty := genMargin; ty <= H-1-genMargin; ty++ {
-		for tx := genMargin; tx <= W-1-genMargin; tx++ {
-			if m.at(tx, ty) == TileFloor {
-				candidates = append(candidates, tilePos{tx, ty})
-			}
+	// Interior cells (skip the outer ring) so generators sit in the maze body,
+	// clear of perimeter spawns. Fall back to all cells on tiny grids.
+	loX, hiX := 1, cellsX-2
+	loY, hiY := 1, cellsY-2
+	if hiX < loX || hiY < loY {
+		loX, hiX, loY, hiY = 0, cellsX-1, 0, cellsY-1
+	}
+	var cands []cellPos
+	for cy := loY; cy <= hiY; cy++ {
+		for cx := loX; cx <= hiX; cx++ {
+			cands = append(cands, cellPos{cx, cy})
 		}
 	}
-	shuffleTilePos(candidates, r)
+	shuffleCells(cands, r)
 
-	accepted := make([]tilePos, 0, generatorCount)
-	for _, c := range candidates {
+	var accepted []cellPos
+	out := make([]tilePos, 0, count)
+	for _, c := range cands {
 		ok := true
 		for _, a := range accepted {
-			if chebyshev(c, a) < 12 {
+			if chebyshevCell(c, a) < genCellGap {
 				ok = false
 				break
 			}
 		}
 		if ok {
 			accepted = append(accepted, c)
-			if len(accepted) == generatorCount {
-				break
+			out = append(out, cellCenter(c))
+			if len(out) == count {
+				return out, true
 			}
 		}
 	}
-	if len(accepted) < generatorCount {
-		return nil, false
-	}
-	return accepted, true
+	return nil, false
 }
 
-// placePlayerSpawns implements §7.7.
-func placePlayerSpawns(m *maze, r *rand.Rand, perimeterBand, playerCount int, gens []tilePos) ([]tilePos, []tilePos, bool) {
-	W, H := m.W, m.H
-	candidates := make([]tilePos, 0, 512)
-	for ty := 1; ty < H-1; ty++ {
-		for tx := 1; tx < W-1; tx++ {
-			if m.at(tx, ty) != TileFloor {
-				continue
-			}
-			// Chebyshev distance from outer wall.
-			d := minInt(minInt(tx, ty), minInt(W-1-tx, H-1-ty))
-			if d <= perimeterBand {
-				candidates = append(candidates, tilePos{tx, ty})
+// placePlayerSpawns chooses spawn cells ≥ spawnCellGap apart, preferring the
+// perimeter ring and keeping ≥ spawnCellGap from generators where the map
+// allows. On small/crowded maps (where the perimeter hugs the interior
+// generators) it relaxes the spawn↔generator gap to ≥1 cell and may place
+// inward. Returns the first playerCount as ordered spawns; any extras feed the
+// respawn pool (MAZE_REVAMP.md §2.2).
+func placePlayerSpawns(r *rand.Rand, cellsX, cellsY, playerCount int, gens []tilePos) ([]tilePos, []tilePos, bool) {
+	genCells := make([]cellPos, len(gens))
+	for i, g := range gens {
+		genCells[i] = tileToCell(g)
+	}
+	// Candidates: perimeter ring first (preferred, §3.1), then interior; each
+	// shuffled, so greedy placement favours the perimeter but can fall inward.
+	var ring, inner []cellPos
+	for cy := 0; cy < cellsY; cy++ {
+		for cx := 0; cx < cellsX; cx++ {
+			c := cellPos{cx, cy}
+			if cx == 0 || cy == 0 || cx == cellsX-1 || cy == cellsY-1 {
+				ring = append(ring, c)
+			} else {
+				inner = append(inner, c)
 			}
 		}
 	}
-	shuffleTilePos(candidates, r)
+	shuffleCells(ring, r)
+	shuffleCells(inner, r)
+	cands := make([]cellPos, 0, len(ring)+len(inner))
+	cands = append(cands, ring...)
+	cands = append(cands, inner...)
 
-	target := playerCount + 2
-	tryWithDistance := func(minDist int) []tilePos {
-		accepted := make([]tilePos, 0, target)
-		for _, c := range candidates {
+	target := playerCount + 2 // +2 extras for the respawn pool
+	greedy := func(genGap int) []tilePos {
+		var accepted []cellPos
+		out := make([]tilePos, 0, target)
+		for _, c := range cands {
 			ok := true
 			for _, a := range accepted {
-				if chebyshev(c, a) < minDist {
-					ok = false
-					break
-				}
-			}
-			if !ok {
-				continue
-			}
-			for _, g := range gens {
-				if chebyshev(c, g) < minDist {
+				if chebyshevCell(c, a) < spawnCellGap {
 					ok = false
 					break
 				}
 			}
 			if ok {
+				for _, g := range genCells {
+					if chebyshevCell(c, g) < genGap {
+						ok = false
+						break
+					}
+				}
+			}
+			if ok {
 				accepted = append(accepted, c)
-				if len(accepted) == target {
+				out = append(out, cellCenter(c))
+				if len(out) == target {
 					break
 				}
 			}
 		}
-		return accepted
+		return out
 	}
 
-	// Strict ≥ 15.
-	spawns := tryWithDistance(15)
-	if len(spawns) >= playerCount {
-		players := spawns[:playerCount]
-		extras := append([]tilePos(nil), spawns[playerCount:]...)
-		return players, extras, true
+	// Strict (spawn↔gen ≥ spawnCellGap) → relaxed (≥1 cell, i.e. never the
+	// same cell as a generator). spawn↔spawn stays ≥ spawnCellGap throughout.
+	out := greedy(spawnCellGap)
+	if len(out) < playerCount {
+		out = greedy(1)
 	}
-	// Fallback ≥ 10.
-	spawns = tryWithDistance(10)
-	if len(spawns) < playerCount {
+	if len(out) < playerCount {
 		return nil, nil, false
 	}
-	if len(spawns) > playerCount {
-		players := spawns[:playerCount]
-		extras := append([]tilePos(nil), spawns[playerCount:]...)
-		return players, extras, true
+	if len(out) > playerCount {
+		return out[:playerCount], append([]tilePos(nil), out[playerCount:]...), true
 	}
-	return spawns, nil, true
+	return out, nil, true
 }
 
 func connectivityOK(m *maze, spawns []tilePos) bool {
@@ -430,7 +440,7 @@ func connectivityOK(m *maze, spawns []tilePos) bool {
 	return true
 }
 
-func shuffleTilePos(s []tilePos, r *rand.Rand) {
+func shuffleCells(s []cellPos, r *rand.Rand) {
 	// Fisher–Yates using r.IntN.
 	for i := len(s) - 1; i > 0; i-- {
 		j := r.IntN(i + 1)
@@ -438,12 +448,28 @@ func shuffleTilePos(s []tilePos, r *rand.Rand) {
 	}
 }
 
+// chebyshev is the tile-space Chebyshev distance (used by maze tests).
 func chebyshev(a, b tilePos) int {
 	dx := a.X - b.X
 	if dx < 0 {
 		dx = -dx
 	}
 	dy := a.Y - b.Y
+	if dy < 0 {
+		dy = -dy
+	}
+	if dx > dy {
+		return dx
+	}
+	return dy
+}
+
+func chebyshevCell(a, b cellPos) int {
+	dx := a.CX - b.CX
+	if dx < 0 {
+		dx = -dx
+	}
+	dy := a.CY - b.CY
 	if dy < 0 {
 		dy = -dy
 	}

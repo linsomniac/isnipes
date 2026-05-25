@@ -278,10 +278,10 @@ func NewMatch(cfg MatchConfig) (*Match, error) {
 		return nil, fmt.Errorf("match: invalid PlayerSlots len %d", len(cfg.PlayerSlots))
 	}
 	if cfg.MapWidth == 0 {
-		cfg.MapWidth = 60
+		cfg.MapWidth = 120 // MAZE_REVAMP.md: wide-corridor maze default
 	}
 	if cfg.MapHeight == 0 {
-		cfg.MapHeight = 40
+		cfg.MapHeight = 80
 	}
 	if cfg.Clock == nil {
 		cfg.Clock = time.Now

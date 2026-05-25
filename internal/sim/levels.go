@@ -14,9 +14,9 @@ type LevelParams struct {
 
 // Phase 3 §6 snipe constants.
 const (
-	snipeHalfExt           int32  = 80
-	snipeBaseSpeed         int32  = 12
-	snipeBrutalSpeed       int32  = 15
+	snipeHalfExt           int32  = 128 // MAZE_REVAMP.md: ~1 tile (player is ~2× this)
+	snipeBaseSpeed         int32  = 24  // MAZE_REVAMP.md: ×2 with the finer grid
+	snipeBrutalSpeed       int32  = 30
 	snipeBaseFireCD        uint16 = 20
 	snipeHardFireCD        uint16 = 15
 	generatorHPBase        uint8  = 3
@@ -55,17 +55,17 @@ func LookupLevel(letter byte, number int) LevelParams {
 	}
 	switch bucket {
 	case bucketEasy: // A..F
-		p.LOSRadius = 6
+		p.LOSRadius = 12 // MAZE_REVAMP.md: tile-denominated distances ×2
 		p.SnipeLeadFactor = 0
 	case bucketMedium: // G..M
-		p.LOSRadius = 8
+		p.LOSRadius = 16
 		p.SnipeLeadFactor = 1
 	case bucketHard: // N..S
-		p.LOSRadius = 10
+		p.LOSRadius = 20
 		p.SnipeLeadFactor = 2
 		p.SnipeFireCooldown = snipeHardFireCD
 	case bucketBrutal: // T..Z
-		p.LOSRadius = 14
+		p.LOSRadius = 28
 		p.SnipeLeadFactor = 2
 		p.SnipeFireCooldown = snipeHardFireCD
 		p.SnipeSpeed = snipeBrutalSpeed

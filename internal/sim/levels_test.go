@@ -8,8 +8,8 @@ import (
 func TestLevelParams_AtoF(t *testing.T) {
 	for _, letter := range []byte{'A', 'B', 'C', 'D', 'E', 'F'} {
 		p := LookupLevel(letter, 1)
-		if p.LOSRadius != 6 {
-			t.Fatalf("letter=%c LOSRadius=%d, want 6", letter, p.LOSRadius)
+		if p.LOSRadius != 12 {
+			t.Fatalf("letter=%c LOSRadius=%d, want 12", letter, p.LOSRadius)
 		}
 		if p.SnipeLeadFactor != 0 {
 			t.Fatalf("letter=%c lead=%d, want 0", letter, p.SnipeLeadFactor)
@@ -17,8 +17,8 @@ func TestLevelParams_AtoF(t *testing.T) {
 		if p.SnipeFireCooldown != 20 {
 			t.Fatalf("letter=%c fireCD=%d, want 20", letter, p.SnipeFireCooldown)
 		}
-		if p.SnipeSpeed != 12 {
-			t.Fatalf("letter=%c speed=%d, want 12", letter, p.SnipeSpeed)
+		if p.SnipeSpeed != 24 {
+			t.Fatalf("letter=%c speed=%d, want 24", letter, p.SnipeSpeed)
 		}
 		if p.GeneratorHP != 3 {
 			t.Fatalf("letter=%c genHP=%d, want 3", letter, p.GeneratorHP)
@@ -29,8 +29,8 @@ func TestLevelParams_AtoF(t *testing.T) {
 func TestLevelParams_GtoM(t *testing.T) {
 	for _, letter := range []byte{'G', 'H', 'I', 'J', 'K', 'L', 'M'} {
 		p := LookupLevel(letter, 1)
-		if p.LOSRadius != 8 {
-			t.Fatalf("letter=%c LOSRadius=%d, want 8", letter, p.LOSRadius)
+		if p.LOSRadius != 16 {
+			t.Fatalf("letter=%c LOSRadius=%d, want 16", letter, p.LOSRadius)
 		}
 		if p.SnipeLeadFactor != 1 {
 			t.Fatalf("letter=%c lead=%d, want 1", letter, p.SnipeLeadFactor)
@@ -38,8 +38,8 @@ func TestLevelParams_GtoM(t *testing.T) {
 		if p.SnipeFireCooldown != 20 {
 			t.Fatalf("letter=%c fireCD=%d, want 20", letter, p.SnipeFireCooldown)
 		}
-		if p.SnipeSpeed != 12 {
-			t.Fatalf("letter=%c speed=%d, want 12", letter, p.SnipeSpeed)
+		if p.SnipeSpeed != 24 {
+			t.Fatalf("letter=%c speed=%d, want 24", letter, p.SnipeSpeed)
 		}
 	}
 }
@@ -47,8 +47,8 @@ func TestLevelParams_GtoM(t *testing.T) {
 func TestLevelParams_NtoS(t *testing.T) {
 	for _, letter := range []byte{'N', 'O', 'P', 'Q', 'R', 'S'} {
 		p := LookupLevel(letter, 1)
-		if p.LOSRadius != 10 {
-			t.Fatalf("letter=%c LOSRadius=%d, want 10", letter, p.LOSRadius)
+		if p.LOSRadius != 20 {
+			t.Fatalf("letter=%c LOSRadius=%d, want 20", letter, p.LOSRadius)
 		}
 		if p.SnipeLeadFactor != 2 {
 			t.Fatalf("letter=%c lead=%d, want 2", letter, p.SnipeLeadFactor)
@@ -56,8 +56,8 @@ func TestLevelParams_NtoS(t *testing.T) {
 		if p.SnipeFireCooldown != 15 {
 			t.Fatalf("letter=%c fireCD=%d, want 15", letter, p.SnipeFireCooldown)
 		}
-		if p.SnipeSpeed != 12 {
-			t.Fatalf("letter=%c speed=%d, want 12", letter, p.SnipeSpeed)
+		if p.SnipeSpeed != 24 {
+			t.Fatalf("letter=%c speed=%d, want 24", letter, p.SnipeSpeed)
 		}
 		if p.GeneratorHP != 3 {
 			t.Fatalf("letter=%c genHP=%d, want 3", letter, p.GeneratorHP)
@@ -68,8 +68,8 @@ func TestLevelParams_NtoS(t *testing.T) {
 func TestLevelParams_TtoZ(t *testing.T) {
 	for _, letter := range []byte{'T', 'U', 'V', 'W', 'X', 'Y', 'Z'} {
 		p := LookupLevel(letter, 1)
-		if p.LOSRadius != 14 {
-			t.Fatalf("letter=%c LOSRadius=%d, want 14", letter, p.LOSRadius)
+		if p.LOSRadius != 28 {
+			t.Fatalf("letter=%c LOSRadius=%d, want 28", letter, p.LOSRadius)
 		}
 		if p.SnipeLeadFactor != 2 {
 			t.Fatalf("letter=%c lead=%d, want 2", letter, p.SnipeLeadFactor)
@@ -77,8 +77,8 @@ func TestLevelParams_TtoZ(t *testing.T) {
 		if p.SnipeFireCooldown != 15 {
 			t.Fatalf("letter=%c fireCD=%d, want 15", letter, p.SnipeFireCooldown)
 		}
-		if p.SnipeSpeed != 15 {
-			t.Fatalf("letter=%c speed=%d, want 15", letter, p.SnipeSpeed)
+		if p.SnipeSpeed != 30 {
+			t.Fatalf("letter=%c speed=%d, want 30", letter, p.SnipeSpeed)
 		}
 		if p.GeneratorHP != 5 {
 			t.Fatalf("letter=%c genHP=%d, want 5", letter, p.GeneratorHP)

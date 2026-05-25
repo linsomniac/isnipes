@@ -1,0 +1,392 @@
+package main
+
+// Throwaway prototype #2 for isnipes maze styles. Models the original as a
+// WIDE-CORRIDOR MAZE: carve a maze on a coarse cell grid (corridor width C
+// tiles, walls 1 tile thin), braid in loops, merge a few chambers. Renders
+// at in-game zoom (a cropped camera view) plus a full overview, in the real
+// game palette, with the player drawn ~2x the snipes. Stdlib-only.
+
+import (
+	"fmt"
+	"image"
+	"image/color"
+	"image/png"
+	"math/rand"
+	"os"
+)
+
+const (
+	wall  = 0
+	floor = 1
+)
+
+type grid struct {
+	W, H int
+	t    []byte
+}
+
+func newGrid(w, h int) *grid { return &grid{w, h, make([]byte, w*h)} }
+
+func (g *grid) set(x, y int, v byte) {
+	if x < 0 || y < 0 || x >= g.W || y >= g.H {
+		return
+	}
+	g.t[y*g.W+x] = v
+}
+func (g *grid) get(x, y int) byte {
+	if x < 0 || y < 0 || x >= g.W || y >= g.H {
+		return wall
+	}
+	return g.t[y*g.W+x]
+}
+
+type cell struct{ cx, cy int }
+
+// genWideMaze carves a maze with C-tile corridors and 1-tile walls, then
+// braids loops (pBraid) and merges nRooms 2x2 chambers.
+func genWideMaze(W, H, C int, pBraid float64, nRooms int, r *rand.Rand) *grid {
+	pitch := C + 1
+	cellsX := (W - 1) / pitch
+	cellsY := (H - 1) / pitch
+	g := newGrid(W, H) // all wall
+
+	carveCell := func(c cell) {
+		ox, oy := c.cx*pitch+1, c.cy*pitch+1
+		for yy := 0; yy < C; yy++ {
+			for xx := 0; xx < C; xx++ {
+				g.set(ox+xx, oy+yy, floor)
+			}
+		}
+	}
+	carveBetween := func(a, b cell) {
+		ax, ay := a.cx*pitch+1, a.cy*pitch+1
+		switch {
+		case b.cx == a.cx+1:
+			for k := 0; k < C; k++ {
+				g.set(ax+C, ay+k, floor)
+			}
+		case b.cx == a.cx-1:
+			for k := 0; k < C; k++ {
+				g.set(ax-1, ay+k, floor)
+			}
+		case b.cy == a.cy+1:
+			for k := 0; k < C; k++ {
+				g.set(ax+k, ay+C, floor)
+			}
+		case b.cy == a.cy-1:
+			for k := 0; k < C; k++ {
+				g.set(ax+k, ay-1, floor)
+			}
+		}
+	}
+	linked := func(a, b cell) bool {
+		ax, ay := a.cx*pitch+1, a.cy*pitch+1
+		switch {
+		case b.cx == a.cx+1:
+			return g.get(ax+C, ay) == floor
+		case b.cx == a.cx-1:
+			return g.get(ax-1, ay) == floor
+		case b.cy == a.cy+1:
+			return g.get(ax, ay+C) == floor
+		default:
+			return g.get(ax, ay-1) == floor
+		}
+	}
+
+	visited := make([]bool, cellsX*cellsY)
+	idx := func(cx, cy int) int { return cy*cellsX + cx }
+	inb := func(cx, cy int) bool { return cx >= 0 && cy >= 0 && cx < cellsX && cy < cellsY }
+	dirs := [4][2]int{{0, -1}, {1, 0}, {0, 1}, {-1, 0}}
+
+	// Recursive-backtracker DFS for long, winding corridors.
+	start := cell{r.Intn(cellsX), r.Intn(cellsY)}
+	visited[idx(start.cx, start.cy)] = true
+	carveCell(start)
+	stack := []cell{start}
+	for len(stack) > 0 {
+		cur := stack[len(stack)-1]
+		var nb []cell
+		for _, d := range dirs {
+			ncx, ncy := cur.cx+d[0], cur.cy+d[1]
+			if inb(ncx, ncy) && !visited[idx(ncx, ncy)] {
+				nb = append(nb, cell{ncx, ncy})
+			}
+		}
+		if len(nb) == 0 {
+			stack = stack[:len(stack)-1]
+			continue
+		}
+		pick := nb[r.Intn(len(nb))]
+		visited[idx(pick.cx, pick.cy)] = true
+		carveCell(pick)
+		carveBetween(cur, pick)
+		stack = append(stack, pick)
+	}
+
+	// Braid: add loops by opening some still-closed walls.
+	for cy := 0; cy < cellsY; cy++ {
+		for cx := 0; cx < cellsX; cx++ {
+			a := cell{cx, cy}
+			for _, b := range []cell{{cx + 1, cy}, {cx, cy + 1}} {
+				if inb(b.cx, b.cy) && !linked(a, b) && r.Float64() < pBraid {
+					carveBetween(a, b)
+				}
+			}
+		}
+	}
+
+	// Rooms: merge a few 2x2 cell super-blocks into open chambers.
+	for i := 0; i < nRooms; i++ {
+		if cellsX < 2 || cellsY < 2 {
+			break
+		}
+		cx := r.Intn(cellsX - 1)
+		cy := r.Intn(cellsY - 1)
+		tl, tr, bl, br := cell{cx, cy}, cell{cx + 1, cy}, cell{cx, cy + 1}, cell{cx + 1, cy + 1}
+		for _, c := range []cell{tl, tr, bl, br} {
+			carveCell(c)
+		}
+		carveBetween(tl, tr)
+		carveBetween(bl, br)
+		carveBetween(tl, bl)
+		carveBetween(tr, br)
+	}
+	return g
+}
+
+// ---- palette + entities ----
+var (
+	colBg     = color.RGBA{0x0a, 0x0a, 0x0f, 0xff}
+	colWall   = color.RGBA{0x2b, 0x2b, 0x40, 0xff}
+	colFloor  = color.RGBA{0x14, 0x14, 0x1c, 0xff}
+	colFloorA = color.RGBA{0x19, 0x19, 0x22, 0xff}
+	colSelf   = color.RGBA{0x4f, 0xd1, 0xff, 0xff}
+	colSnipe  = color.RGBA{0xff, 0x5a, 0x5a, 0xff}
+	colGen    = color.RGBA{0xff, 0xd1, 0x66, 0xff}
+)
+
+type ent struct {
+	tx, ty int
+	c      color.RGBA
+	rFrac  float64
+}
+
+func nearestFloor(g *grid, tx, ty int) (int, int) {
+	if g.get(tx, ty) == floor {
+		return tx, ty
+	}
+	for rad := 1; rad < 20; rad++ {
+		for dy := -rad; dy <= rad; dy++ {
+			for dx := -rad; dx <= rad; dx++ {
+				if g.get(tx+dx, ty+dy) == floor {
+					return tx + dx, ty + dy
+				}
+			}
+		}
+	}
+	return tx, ty
+}
+
+// sampleEntities puts a player near map center plus snipes/generator nearby
+// so the zoom crop shows entity-vs-corridor scale. Player ~2x snipe. radii
+// are tile-fractions; offScale spreads the satellites for finer grids.
+func sampleEntities(g *grid, playerR, snipeR, genR float64, offScale int) (cell, []ent) {
+	pcx, pcy := nearestFloor(g, g.W/2, g.H/2)
+	es := []ent{{pcx, pcy, colSelf, playerR}}
+	offs := []struct{ dx, dy int }{{-5, -3}, {6, -4}, {3, 5}, {-7, 4}}
+	cols := []color.RGBA{colSnipe, colSnipe, colSnipe, colGen}
+	rs := []float64{snipeR, snipeR, snipeR, genR}
+	for i, o := range offs {
+		fx, fy := nearestFloor(g, pcx+o.dx*offScale, pcy+o.dy*offScale)
+		es = append(es, ent{fx, fy, cols[i], rs[i]})
+	}
+	return cell{pcx, pcy}, es
+}
+
+func fillCircle(img *image.RGBA, cx, cy, r int, fill, outline color.RGBA) {
+	for dy := -r - 1; dy <= r+1; dy++ {
+		for dx := -r - 1; dx <= r+1; dx++ {
+			d2 := dx*dx + dy*dy
+			switch {
+			case d2 <= (r-1)*(r-1):
+				img.Set(cx+dx, cy+dy, fill)
+			case d2 <= r*r:
+				img.Set(cx+dx, cy+dy, outline)
+			}
+		}
+	}
+}
+
+func tileColor(g *grid, tx, ty int) color.RGBA {
+	if g.get(tx, ty) == wall {
+		return colWall
+	}
+	if (tx+ty)%2 == 0 {
+		return colFloor
+	}
+	return colFloorA
+}
+
+// renderCrop draws a viewW x viewH tile window centered on cam, at tilePx,
+// matching the in-game zoomed camera. Entities inside the window are drawn.
+func renderCrop(g *grid, path string, tilePx, viewW, viewH int, cam cell, ents []ent) error {
+	x0 := clamp(cam.cx-viewW/2, 0, maxi(0, g.W-viewW))
+	y0 := clamp(cam.cy-viewH/2, 0, maxi(0, g.H-viewH))
+	img := image.NewRGBA(image.Rect(0, 0, viewW*tilePx, viewH*tilePx))
+	for vy := 0; vy < viewH; vy++ {
+		for vx := 0; vx < viewW; vx++ {
+			c := tileColor(g, x0+vx, y0+vy)
+			for py := 0; py < tilePx; py++ {
+				for px := 0; px < tilePx; px++ {
+					img.Set(vx*tilePx+px, vy*tilePx+py, c)
+				}
+			}
+		}
+	}
+	for _, e := range ents {
+		if e.tx < x0 || e.ty < y0 || e.tx >= x0+viewW || e.ty >= y0+viewH {
+			continue
+		}
+		cx := (e.tx-x0)*tilePx + tilePx/2
+		cy := (e.ty-y0)*tilePx + tilePx/2
+		fillCircle(img, cx, cy, int(e.rFrac*float64(tilePx)), e.c, colBg)
+	}
+	return writePNG(img, path)
+}
+
+func renderOverview(g *grid, path string, tilePx int, ents []ent) error {
+	img := image.NewRGBA(image.Rect(0, 0, g.W*tilePx, g.H*tilePx))
+	for ty := 0; ty < g.H; ty++ {
+		for tx := 0; tx < g.W; tx++ {
+			c := tileColor(g, tx, ty)
+			for py := 0; py < tilePx; py++ {
+				for px := 0; px < tilePx; px++ {
+					img.Set(tx*tilePx+px, ty*tilePx+py, c)
+				}
+			}
+		}
+	}
+	for _, e := range ents {
+		cx := e.tx*tilePx + tilePx/2
+		cy := e.ty*tilePx + tilePx/2
+		fillCircle(img, cx, cy, maxi(2, int(e.rFrac*float64(tilePx))), e.c, colBg)
+	}
+	return writePNG(img, path)
+}
+
+func writePNG(img *image.RGBA, path string) error {
+	f, err := os.Create(path)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	return png.Encode(f, img)
+}
+
+// runFinal renders the chosen V4 style at production parameters: a 120x80
+// map (within the existing SPEC cap), entities at their proposed real
+// hitboxes (player ~2 tiles, snipe ~1 tile so player ~2x snipe, drawn at
+// hitbox so render==collision), at a couple of corridor widths + seeds.
+func runFinal() {
+	const W, H = 120, 80
+	cases := []struct {
+		name string
+		C    int
+		seed int64
+	}{
+		{"C6_s7", 6, 7},
+		{"C6_s13", 6, 13},
+		{"C7_s7", 7, 7},
+		{"C5_s7", 5, 7},
+	}
+	for _, c := range cases {
+		r := rand.New(rand.NewSource(c.seed))
+		g := genWideMaze(W, H, c.C, 0.18, 5, r)
+		// player diameter ~2 tiles (rFrac 1.0 radius), snipe ~1 tile, gen ~2.
+		cam, ents := sampleEntities(g, 1.0, 0.5, 1.0, 4)
+		crop := fmt.Sprintf("/tmp/mazeproto/FINAL_%s_zoom.png", c.name)
+		over := fmt.Sprintf("/tmp/mazeproto/FINAL_%s_overview.png", c.name)
+		if err := renderCrop(g, crop, 24, 50, 32, cam, ents); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		if err := renderOverview(g, over, 8, ents); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		fmt.Println("wrote", crop, "and", over)
+	}
+}
+
+func clamp(v, lo, hi int) int {
+	if v < lo {
+		return lo
+	}
+	if v > hi {
+		return hi
+	}
+	return v
+}
+func maxi(a, b int) int {
+	if a > b {
+		return a
+	}
+	return b
+}
+
+func main() {
+	if len(os.Args) > 1 && os.Args[1] == "final" {
+		runFinal()
+		return
+	}
+	seed := int64(7)
+	if len(os.Args) > 1 {
+		fmt.Sscan(os.Args[1], &seed)
+	}
+	W, H := 60, 40
+	variants := []struct {
+		name    string
+		C       int
+		pBraid  float64
+		nRooms  int
+	}{
+		{"V1_tight_C2", 2, 0.12, 2},
+		{"V2_loops_rooms_C2", 2, 0.25, 4},
+		{"V3_roomy_C3", 3, 0.20, 3},
+	}
+	for _, v := range variants {
+		r := rand.New(rand.NewSource(seed))
+		g := genWideMaze(W, H, v.C, v.pBraid, v.nRooms, r)
+		cam, ents := sampleEntities(g, 0.40, 0.20, 0.45, 1)
+		crop := fmt.Sprintf("/tmp/mazeproto/%s_zoom.png", v.name)
+		over := fmt.Sprintf("/tmp/mazeproto/%s_overview.png", v.name)
+		if err := renderCrop(g, crop, 48, 26, 17, cam, ents); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		if err := renderOverview(g, over, 14, ents); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		fmt.Println("wrote", crop, "and", over)
+	}
+
+	// V4: higher-resolution grid -> truly thin (1-tile) walls. Player spans
+	// ~2 tiles, corridors ~7 tiles. Bigger tile count than current limits.
+	{
+		r := rand.New(rand.NewSource(seed))
+		hg := genWideMaze(144, 96, 7, 0.20, 3, r)
+		cam, ents := sampleEntities(hg, 0.95, 0.47, 1.10, 3)
+		crop := "/tmp/mazeproto/V4_thinwalls_hires_zoom.png"
+		over := "/tmp/mazeproto/V4_thinwalls_hires_overview.png"
+		if err := renderCrop(hg, crop, 20, 62, 40, cam, ents); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		if err := renderOverview(hg, over, 6, ents); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		fmt.Println("wrote", crop, "and", over)
+	}
+}

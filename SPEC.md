@@ -111,12 +111,21 @@ Sources (verified):
 ## 3. Gameplay specification (v1)
 
 ### 3.1 The maze
-- A rectangular grid of **tiles**. Default: **60 columns × 40 rows** (≈ 2,400
-  tiles). Configurable per match (min 30×20, max 120×80).
+
+> **Superseded by [`MAZE_REVAMP.md`](MAZE_REVAMP.md) (2026-05).** The maze is now
+> a **wide-corridor braided maze** (6-tile corridors separated by 1-tile walls)
+> on a **120 × 80** default grid, with entity sizes/speeds and tile-denominated
+> distances scaled so the player spans ~2 tiles. The growing-tree description
+> below is kept for history; `MAZE_REVAMP.md` is authoritative for the generator
+> and the rescaled §3.2 / §3.3 / §3.7 / §5.3 numbers.
+
+- A rectangular grid of **tiles**. Default: **120 columns × 80 rows**.
+  Configurable per match (min 50×40, max 120×80).
 - Each tile is one of: `WALL`, `FLOOR`, `SPAWN_PLAYER`, `SPAWN_GENERATOR`.
 - Walls block movement and projectiles.
 - The maze is enclosed by an outer wall of `WALL` tiles.
-- **Generation algorithm (deterministic given a seed):**
+- **Generation algorithm** (historical — see `MAZE_REVAMP.md §2` for the current
+  wide-corridor generator; deterministic given a seed):
   1. Carve corridors with a **growing-tree** algorithm (newest-cell bias 0.6,
      random bias 0.4) to give a mix of long corridors and small rooms.
   2. Randomly carve N "rooms" (rectangular openings) for breathing space:
@@ -143,12 +152,15 @@ dead-cam (§3.9), by `Event.actor` for system/environmental events
 (§4.3.2), and by `Event.target = 0` for events not tied to a specific
 entity. The allocator never issues `0` to a live entity; IDs start at 1.
 
+Hitbox radii below are the MAZE_REVAMP.md values (the player spans ~2 tiles and
+is ~2× a snipe); the parenthetical is the pre-revamp value.
+
 | Kind | Description | HP | Hitbox radius (subtile units) |
 |---|---|---|---|
-| `PLAYER` | Human-controlled. | 1 (1-shot kill, classic feel) | 96 |
-| `SNIPE` | NPC enemy spawned by generators. | 1 | 80 |
-| `GENERATOR` | Static; emits snipes. | 3 | 112 |
-| `PROJECTILE` | A shot fired by player or snipe. | n/a | 24 |
+| `PLAYER` | Human-controlled. | 1 (1-shot kill, classic feel) | 256 (was 96) |
+| `SNIPE` | NPC enemy spawned by generators. | 1 | 128 (was 80) |
+| `GENERATOR` | Static; emits snipes. | 3 | 256 (was 112) |
+| `PROJECTILE` | A shot fired by player or snipe. | n/a | 48 (was 24) |
 
 - 1-HP players make matches fast and tense, faithful to the original.
   Optional `hp_per_player` server-config knob for friendlier modes.
@@ -157,13 +169,13 @@ entity. The allocator never issues `0` to a live entity; IDs start at 1.
 
 - **Tick rate:** simulation runs at **30 Hz** (33.3 ms per tick). Determinism
   requires fixed timestep, never variable.
-- **Speeds (in subtile units per tick):**
-  - Player normal speed: 16 (≈ 1.875 tiles/sec).
-  - Player turbo speed: 32 (≈ 3.75 tiles/sec) — **identical to projectile
+- **Speeds (in subtile units per tick; MAZE_REVAMP.md ×2, was-value in parens):**
+  - Player normal speed: 32 (was 16).
+  - Player turbo speed: 64 (was 32) — **identical to projectile
     speed**, per the original. Locks the player into a single direction
     while turbo is held (no instant 180s at full speed).
-  - Snipe speed: 12 (slower than a non-turbo player but they have numbers).
-  - Projectile speed: 32 (= player turbo).
+  - Snipe speed: 24 (was 12; slower than a non-turbo player but they have numbers).
+  - Projectile speed: 64 (was 32; = player turbo).
 - **Input model:** 8-way intended direction (N, NE, E, SE, S, SW, W, NW) +
   turbo flag + fire-direction-or-none. Continuous position update each tick:
   `pos += speed * unit(dir)`.
@@ -250,11 +262,12 @@ Faithful homage to the A–Z / 1–9 selector. Stored as a server config preset:
 
 - **Letter (A–Z)** controls qualitative behavior (all numeric parameters
   defined in `internal/sim/levels.go` and unit-tested):
-  - A–F: snipes patrol slow, low accuracy, short LOS (≤ 6 tiles), no lead.
-  - G–M: medium speed/accuracy, LOS 8 tiles, lead = ½ of computed lead.
-  - N–S: high accuracy, LOS 10 tiles, full lead shots, snipe fire
+  (LOS radii are MAZE_REVAMP.md ×2 with the finer grid; was-value in parens.)
+  - A–F: snipes patrol slow, low accuracy, short LOS (≤ 12 tiles, was 6), no lead.
+  - G–M: medium speed/accuracy, LOS 16 tiles (was 8), lead = ½ of computed lead.
+  - N–S: high accuracy, LOS 20 tiles (was 10), full lead shots, snipe fire
     cooldown -25 %.
-  - T–Z: LOS 14 tiles, generators HP 5, snipe speed +25 %.
+  - T–Z: LOS 28 tiles (was 14), generators HP 5, snipe speed +25 %.
 
   (Original Snipes also had "diagonal shots bounce off walls" as a
   letter-controlled flag. v1 does **not** implement projectile ricochet;
@@ -777,15 +790,18 @@ when the cap is reached:
 1. **Self** — the recipient's own player entity (or none, if in dead-cam).
 2. **Other players** — by distance ascending, all included if possible.
 3. **Recipient's own projectiles** — all included regardless of distance.
-4. **Projectiles within 10 tiles** of the recipient — distance ascending.
-5. **Generators within 20 tiles** — distance ascending.
-6. **Snipes within 20 tiles** — distance ascending.
+4. **Projectiles within 20 tiles** of the recipient — distance ascending.
+5. **Generators within 40 tiles** — distance ascending.
+6. **Snipes within 40 tiles** — distance ascending.
 7. **Other entities** (further-out projectiles, snipes, generators) by
    distance ascending until the cap is reached.
 
+(AOI radii are the MAZE_REVAMP.md ×2 values, scaled with the finer 120×80 grid;
+pre-revamp they were 10 / 20 / 12 / 22 tiles.)
+
 A **hysteresis** rule applies for entities at the boundary: an entity
 included in the previous snapshot stays included until it crosses the
-*outer* boundary (e.g. 12 tiles for projectiles, 22 tiles for snipes/
+*outer* boundary (e.g. 24 tiles for projectiles, 44 tiles for snipes/
 generators). This prevents oscillation when an entity hovers near the
 threshold.
 

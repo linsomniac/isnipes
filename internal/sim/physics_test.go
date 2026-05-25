@@ -124,7 +124,9 @@ func TestMoveSlidesAlongWall(t *testing.T) {
 	// the cardinal advance.
 	s := newFixtureSim(t)
 	cx := int32(5*subtilePerTile + subtilePerTile/2)
-	cy := int32((s.Height()-2)*subtilePerTile + subtilePerTile/2)
+	// H-3, not H-2: the 2-tile-tall player (playerHalfExt=256) placed at H-2
+	// would overlap the bottom wall, so X would clamp instead of advancing.
+	cy := int32((s.Height()-3)*subtilePerTile + subtilePerTile/2)
 	PlacePlayerForTest(s, 1, cx, cy)
 	for i := 0; i < 5; i++ {
 		_, err := s.Tick([]PlayerInput{{PlayerID: 1, Dir: DirE}})

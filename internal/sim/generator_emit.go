@@ -69,16 +69,26 @@ func (s *Sim) runGeneratorEmissions() []Event {
 	return events
 }
 
-// findEmissionSlot walks the 8 neighbouring tiles in the per-generator
-// rotation order and returns the first that satisfies §11.3 step 3
-// conditions.
+// emitRingDist is the tile distance from a generator's centre tile at which
+// snipes spawn. The original placed snipes on the immediate (1-tile) ring, but
+// MAZE_REVAMP.md enlarged entities so a 1-tile snipe (snipeHalfExt) on the
+// immediate ring would overlap the now 2-tile generator (generatorHalfExt).
+// Spawning at this ring guarantees the snipe AABB clears the generator AABB;
+// it still lands inside the generator's wide corridor cell.
+const emitRingDist = (int(generatorHalfExt)+int(snipeHalfExt))/subtilePerTile + 1
+
+// findEmissionSlot walks the 8 neighbouring slots (at emitRingDist) in the
+// per-generator rotation order and returns the first that satisfies §11.3
+// step 3 conditions.
 func (s *Sim) findEmissionSlot(gen *Entity, gs *generatorState) (tilePos, bool) {
 	gtx := int(gen.X / subtilePerTile)
 	gty := int(gen.Y / subtilePerTile)
-	// Fixed neighbour order per §3.6: N, E, S, W, NE, SE, SW, NW.
+	// Fixed neighbour order per §3.6: N, E, S, W, NE, SE, SW, NW (scaled to
+	// the emitRingDist ring).
+	const d = emitRingDist
 	base := [8]tilePos{
-		{0, -1}, {1, 0}, {0, 1}, {-1, 0}, // N E S W
-		{1, -1}, {1, 1}, {-1, 1}, {-1, -1}, // NE SE SW NW
+		{0, -d}, {d, 0}, {0, d}, {-d, 0}, // N E S W
+		{d, -d}, {d, d}, {-d, d}, {-d, -d}, // NE SE SW NW
 	}
 	for i := 0; i < 8; i++ {
 		off := base[(int(gs.rotation)+i)%8]

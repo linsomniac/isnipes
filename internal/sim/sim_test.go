@@ -326,39 +326,34 @@ func phase5Rendezvous(s *Sim) (int, int) {
 	return cx, cy
 }
 
-// steerAlongPath converts a BFS next-tile into a movement Dir with
-// "center-then-turn" alignment: before turning onto the cross axis the
-// player first slides to the current tile centre on that axis, so its
-// hitbox (half-extent 96, leaving ±32 subtile corridor clearance)
-// clears the corner. Without this the player jams against a wall when it
-// tries to turn while off-centre.
+// steerAlongPath converts a BFS next-tile into a CARDINAL movement Dir toward
+// that tile's centre (dominant axis first). MAZE_REVAMP.md widened corridors to
+// corridorWidth tiles but left 1-tile wall pillars at 4-cell junctions;
+// cardinal-only motion keeps the 2-tile player off those pillars (diagonal
+// motion clips them and stalls). The current tile (tx, ty) is unused now.
 func steerAlongPath(x, y int32, tx, ty, nx, ny int) Dir {
-	const center = subtilePerTile / 2
-	const align = 24 // < (128-96)=32 clearance
-	curCX := int32(tx*subtilePerTile + center)
-	curCY := int32(ty*subtilePerTile + center)
-	if nx != tx {
-		if y-curCY > align {
-			return DirN
-		}
-		if curCY-y > align {
-			return DirS
-		}
-		if nx > tx {
+	_, _ = tx, ty
+	dx := int32(nx*subtilePerTile+subtilePerTile/2) - x
+	dy := int32(ny*subtilePerTile+subtilePerTile/2) - y
+	adx, ady := dx, dy
+	if adx < 0 {
+		adx = -adx
+	}
+	if ady < 0 {
+		ady = -ady
+	}
+	if adx >= ady {
+		if dx > 0 {
 			return DirE
 		}
-		return DirW
-	}
-	if ny != ty {
-		if x-curCX > align {
+		if dx < 0 {
 			return DirW
 		}
-		if curCX-x > align {
-			return DirE
-		}
-		if ny > ty {
-			return DirS
-		}
+	}
+	if dy > 0 {
+		return DirS
+	}
+	if dy < 0 {
 		return DirN
 	}
 	return DirIdle
@@ -500,11 +495,97 @@ func generatePhase5LSInputs(t *testing.T) [][]PlayerInput {
 	return out
 }
 
-// phase5LSTickInputs computes one tick of the hunt: player 1 BFS-paths to
-// the nearest living victim (center-then-turn steering) and fires point-
-// blank once orthogonally adjacent. Deterministic — reads only entity
-// positions and the immutable maze, with a fixed victim-ID order for
-// tie-breaking.
+// cellOfTile returns the maze cell containing an arbitrary tile.
+func cellOfTile(tx, ty int) cellPos {
+	return cellPos{(tx - 1) / mazePitch, (ty - 1) / mazePitch}
+}
+
+// nextCell BFS's the cell graph (open links) from `from` toward `to` and
+// returns the next cell to move to. Cell-to-cell motion through the
+// corridorWidth-wide openings is collision-safe for the 2-tile player, unlike
+// greedy tile-following past the 1-tile junction pillars.
+func nextCell(m *maze, from, to cellPos, cellsX, cellsY int) (cellPos, bool) {
+	if from == to {
+		return to, true
+	}
+	parent := map[cellPos]cellPos{from: from}
+	q := []cellPos{from}
+	for len(q) > 0 {
+		cur := q[0]
+		q = q[1:]
+		if cur == to {
+			break
+		}
+		for _, d := range cellDirs {
+			n := cellPos{cur.CX + d.CX, cur.CY + d.CY}
+			if n.CX < 0 || n.CY < 0 || n.CX >= cellsX || n.CY >= cellsY {
+				continue
+			}
+			if _, seen := parent[n]; seen {
+				continue
+			}
+			if !linked(m, cur, n) {
+				continue
+			}
+			parent[n] = cur
+			q = append(q, n)
+		}
+	}
+	if _, ok := parent[to]; !ok {
+		return cellPos{}, false
+	}
+	step := to
+	for parent[step] != from {
+		step = parent[step]
+	}
+	return step, true
+}
+
+// cellCenterSub returns a cell's centre in subtile coordinates.
+func cellCenterSub(c cellPos) (int32, int32) {
+	ct := cellCenter(c)
+	return int32(ct.X*subtilePerTile + subtilePerTile/2), int32(ct.Y*subtilePerTile + subtilePerTile/2)
+}
+
+// steerToCell moves the hunter from cell hc toward adjacent cell nc, aligning
+// on the axis perpendicular to the link FIRST (so the 2-tile body fits through
+// the corridorWidth-wide opening) before stepping across. Both cell centres
+// share the perpendicular coordinate, so aligning to hc's centre also aligns to
+// the opening.
+func steerToCell(hx, hy int32, hc, nc cellPos) Dir {
+	const tol = subtilePerTile / 2 // ≤ (corridorWidth-2)/2 tiles of slack
+	ccx, ccy := cellCenterSub(hc)
+	ncx, ncy := cellCenterSub(nc)
+	if nc.CX != hc.CX { // horizontal link → align Y, then move E/W
+		if hy-ccy > tol {
+			return DirN
+		}
+		if ccy-hy > tol {
+			return DirS
+		}
+		if ncx > hx {
+			return DirE
+		}
+		return DirW
+	}
+	// vertical link → align X, then move N/S
+	if hx-ccx > tol {
+		return DirW
+	}
+	if ccx-hx > tol {
+		return DirE
+	}
+	if ncy > hy {
+		return DirS
+	}
+	return DirN
+}
+
+// phase5LSTickInputs computes one tick of the hunt: player 1 navigates
+// cell-to-cell toward the nearest living victim and, once in the victim's cell,
+// aligns on the cross axis and fires down the shared row/column. Victims sit at
+// cell centres (spawn / respawn). Deterministic — reads only entity positions
+// and the immutable maze, with a fixed victim-ID order for tie-breaking.
 func phase5LSTickInputs(s *Sim, i int) []PlayerInput {
 	pos := make(map[EntityID]Entity, 4)
 	for _, e := range s.Entities() {
@@ -534,16 +615,19 @@ func phase5LSTickInputs(s *Sim, i int) []PlayerInput {
 		return []PlayerInput{{PlayerID: 1, ClientTick: uint16(i)}}
 	}
 	tx, ty := int(target.X)/subtilePerTile, int(target.Y)/subtilePerTile
+	cellsX := (s.maze.W - 1) / mazePitch
+	cellsY := (s.maze.H - 1) / mazePitch
+	hc := cellOfTile(hx, hy)
+	vc := cellOfTile(tx, ty)
 	var dir, fire Dir
-	if bestDist <= 1 {
-		// Orthogonally adjacent. A straight 8-dir shot only intersects the
-		// target's AABB (half-extent 96) if the shooter is aligned on the
-		// perpendicular axis, so slide onto the target's cross-axis first,
-		// then fire down the shared row/column.
-		const fireAlign = 80 // < half-extent 96 ⇒ projectile line crosses the AABB
+	if hc == vc {
+		// Same room: align on the axis of smaller separation and fire down the
+		// other. fireAlign < snipeHalfExt/playerHalfExt so the shot crosses the
+		// target AABB.
+		const fireAlign = 64
 		dx := int(target.X) - int(hunter.X)
 		dy := int(target.Y) - int(hunter.Y)
-		if hy == ty { // share a row → fire E/W, align Y
+		if absInt(dx) >= absInt(dy) { // horizontal shot: align Y, fire E/W
 			switch {
 			case dy > fireAlign:
 				dir = DirS
@@ -554,7 +638,7 @@ func phase5LSTickInputs(s *Sim, i int) []PlayerInput {
 			default:
 				fire = DirW
 			}
-		} else { // share a column → fire N/S, align X
+		} else { // vertical shot: align X, fire N/S
 			switch {
 			case dx > fireAlign:
 				dir = DirE
@@ -566,10 +650,8 @@ func phase5LSTickInputs(s *Sim, i int) []PlayerInput {
 				fire = DirN
 			}
 		}
-	} else {
-		if nx, ny, ok := PathNext(s.maze, hx, hy, tx, ty, 4096); ok {
-			dir = steerAlongPath(hunter.X, hunter.Y, hx, hy, nx, ny)
-		}
+	} else if nc, ok := nextCell(s.maze, hc, vc, cellsX, cellsY); ok {
+		dir = steerToCell(hunter.X, hunter.Y, hc, nc)
 	}
 	return []PlayerInput{{PlayerID: 1, Dir: dir, FireDir: fire, ClientTick: uint16(i)}}
 }
