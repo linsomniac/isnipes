@@ -2,7 +2,8 @@
 # PHASE7.md DoD #2 — frozen-file guard. Phase 7 must not edit the files
 # that lock the wire schema / deterministic sim:
 #   - internal/sim/**            (determinism fingerprints)
-#   - internal/proto/checksum.go (schemaChecksum source)
+#   - internal/proto/*.go        (wire schema: checksum, frame, messages, …;
+#                                 _test.go excluded)
 #   - web/src/{proto,sim,prediction,interp,netClient}.ts (client mirrors)
 #
 # The committed manifest scripts/frozen.sha256 records their sha256. This
@@ -15,7 +16,10 @@ MANIFEST="scripts/frozen.sha256"
 
 frozen_files() {
   {
-    echo internal/proto/checksum.go
+    # All wire-schema source in internal/proto (not just checksum.go) so the
+    # "no wire change" invariant is mechanically backed (PHASE8 §1, DoD #2).
+    # _test.go files are excluded: tests are not the wire contract.
+    find internal/proto -name '*.go' ! -name '*_test.go'
     echo web/src/proto.ts
     echo web/src/sim.ts
     echo web/src/prediction.ts
