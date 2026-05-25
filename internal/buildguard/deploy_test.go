@@ -41,24 +41,30 @@ func TestDeploy_FilesPresent(t *testing.T) {
 		}
 	}
 
-	// Dockerfile: multi-stage, embedded, static, scratch final (DoD #14).
+	// Dockerfile: multi-stage, DIGEST-PINNED builders, embedded, static,
+	// scratch final, public port only, dist wiped, admin loopback (DoD #14).
 	df := readRepoFile(t, root, "Dockerfile")
 	mustContain(t, "Dockerfile", df,
 		"AS web", "AS build", "FROM scratch",
-		"-tags embed", "CGO_ENABLED=0")
+		"-tags embed", "CGO_ENABLED=0",
+		"EXPOSE 8080", "rm -rf cmd/isnipes/dist", "--admin-addr=127.0.0.1")
+	if n := strings.Count(df, "@sha256:"); n < 2 {
+		t.Errorf("Dockerfile builders not digest-pinned: found %d @sha256: pins, want ≥2", n)
+	}
 
-	// systemd unit: hardened + loopback listeners (DoD #15).
+	// systemd unit: hardened + BOTH listeners loopback + no caps (DoD #15).
 	svc := readRepoFile(t, root, "deploy/isnipes.service")
 	mustContain(t, "deploy/isnipes.service", svc,
-		"NoNewPrivileges=yes", "DynamicUser=yes",
-		"--admin-addr=127.0.0.1", "WantedBy=multi-user.target")
+		"NoNewPrivileges=yes", "DynamicUser=yes", "CapabilityBoundingSet=",
+		"--addr=127.0.0.1", "--admin-addr=127.0.0.1", "WantedBy=multi-user.target")
 
-	// nginx: WS upgrade proxy + denies the admin paths (DoD #16).
+	// nginx: WS upgrade proxy + actually DENIES the admin paths (DoD #16).
 	ng := readRepoFile(t, root, "deploy/nginx.conf")
 	mustContain(t, "deploy/nginx.conf", ng,
-		"proxy_set_header Upgrade", "proxy_pass http://127.0.0.1:8080")
-	if !strings.Contains(ng, "/metrics") || !strings.Contains(ng, "/debug/pprof") {
-		t.Error("deploy/nginx.conf must reference and deny /metrics and /debug/pprof")
+		"proxy_set_header Upgrade", "proxy_pass http://127.0.0.1:8080",
+		"location = /metrics", "location /debug/pprof")
+	if n := strings.Count(ng, "return 404"); n < 2 {
+		t.Errorf("deploy/nginx.conf must deny both admin paths with return 404 (found %d)", n)
 	}
 
 	// README: build/docker/systemd/nginx/flags/endpoints (DoD #17).

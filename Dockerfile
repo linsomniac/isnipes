@@ -1,11 +1,12 @@
 # PHASE8.md §11 — multi-stage build → tiny static image.
 #
-# Production deployments SHOULD pin the builder images by digest
-# (node:20-alpine@sha256:..., golang:1.26-alpine@sha256:...) for
-# reproducibility; tags are used here for readability.
+# Builder images are pinned by digest (tag kept for readability) so rebuilds
+# are reproducible and a retagged/compromised base cannot slip in. Refresh
+# the digests intentionally with `docker pull <tag>` + `docker inspect
+# --format '{{index .RepoDigests 0}}' <tag>`.
 
 # Stage 1: web build (esbuild bundle).
-FROM node:20-alpine AS web
+FROM node:20-alpine@sha256:fb4cd12c85ee03686f6af5362a0b0d56d50c58a04632e6c0fb8363f609372293 AS web
 WORKDIR /web
 COPY web/package.json web/package-lock.json ./
 RUN npm ci
@@ -13,7 +14,7 @@ COPY web/ ./
 RUN rm -rf dist && npm run build   # → /web/dist/{app.js,index.html}
 
 # Stage 2: Go build with the client embedded.
-FROM golang:1.26-alpine AS build
+FROM golang:1.26-alpine@sha256:91eda9776261207ea25fd06b5b7fed8d397dd2c0a283e77f2ab6e91bfa71079d AS build
 WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download

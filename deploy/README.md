@@ -25,8 +25,9 @@ Multi-stage build (node → go `-tags embed` → `FROM scratch`); the final
 image is the static binary (~10 MB). Only `:8080` is published; the admin
 listener stays on loopback inside the container. `scratch` ships no CA
 bundle — for outbound HTTPS from the container, add a CA layer or switch
-the final stage to `gcr.io/distroless/static`. Pin the builder images by
-digest for reproducible builds.
+the final stage to `gcr.io/distroless/static`. The builder images are
+digest-pinned for reproducible builds (refresh with `docker pull` +
+`docker inspect --format '{{index .RepoDigests 0}}'`).
 
 ## systemd
 

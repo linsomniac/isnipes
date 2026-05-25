@@ -13,3 +13,15 @@ isnipes
 .phase-loop-notes.md
 *.md
 deploy
+
+# Never ship local credentials into the build context (defense in depth;
+# COPY . . in the build stage would otherwise ingest them into builder
+# layers/cache). The deploy guide has operators keep TLS cert/key files
+# near the repo for --require-tls.
+*.pem
+*.key
+*.crt
+.env
+.env.*
+.npmrc
+.netrc

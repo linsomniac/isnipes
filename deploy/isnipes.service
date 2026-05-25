@@ -33,6 +33,12 @@ RestrictNamespaces=yes
 LockPersonality=yes
 MemoryDenyWriteExecute=yes
 SystemCallArchitectures=native
+ProtectProc=invisible
+ProcSubset=pid
+# Only loopback is needed (nginx → server; loopback admin listener). Deny
+# all other egress/ingress so a compromised server can't reach the network.
+IPAddressDeny=any
+IPAddressAllow=localhost
 
 [Install]
 WantedBy=multi-user.target
