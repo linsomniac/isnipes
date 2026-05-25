@@ -1,4 +1,4 @@
-.PHONY: build test test-race test-testhooks test-synthetic vet fmt clean run
+.PHONY: build test test-race test-testhooks test-synthetic vet fmt clean run check-frozen
 
 BIN := isnipes
 
@@ -21,6 +21,10 @@ test-testhooks:
 
 test-synthetic:
 	go test -race -count=1 -tags synthetic ./...
+
+# PHASE7.md DoD #2 — fail if a frozen wire-schema / sim file changed.
+check-frozen:
+	@bash scripts/check-frozen.sh
 
 vet:
 	go vet ./...
