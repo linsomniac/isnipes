@@ -103,7 +103,7 @@ func NewLobby(cfg Config) *Lobby {
 		cfg.TokenTTL = TokenTTL
 	}
 	if cfg.ServerVersion == "" {
-		cfg.ServerVersion = "v0.0.0-phase2"
+		cfg.ServerVersion = "v1.0.0"
 	}
 	return &Lobby{
 		cfg:           cfg,

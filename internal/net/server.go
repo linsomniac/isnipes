@@ -68,7 +68,7 @@ func NewServer(cfg ServerConfig) *Server {
 		cfg.PingInterval = 500 * time.Millisecond
 	}
 	if cfg.ServerVersion == "" {
-		cfg.ServerVersion = "v0.0.0-phase2"
+		cfg.ServerVersion = "v1.0.0"
 	}
 	return &Server{cfg: cfg}
 }
