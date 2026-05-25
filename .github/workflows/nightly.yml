@@ -1,0 +1,21 @@
+# PHASE8.md §9 — nightly perf (NOT PR-blocking). 512-player regression vs
+# the committed baseline, plus the soak. Failures alert; they do not gate PRs.
+name: nightly
+
+on:
+  schedule:
+    - cron: '0 7 * * *' # 07:00 UTC daily
+  workflow_dispatch:
+
+jobs:
+  perf:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.26'
+      - name: 512-player regression
+        run: make perf-nightly
+      - name: Soak (short window in CI; full 24h is operator-run)
+        run: go run scripts/loadtest.go --soak --duration=10m --rotate-every=1m

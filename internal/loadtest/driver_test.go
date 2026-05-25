@@ -68,6 +68,27 @@ func TestLoad_ClientCountsMidRunDrop(t *testing.T) {
 	}
 }
 
+// TestLoad_SoakSmoke exercises the soak sampling path at tiny scale (the
+// full 24h soak is operator-run). It must complete with no leak and a
+// populated peak-goroutine figure.
+func TestLoad_SoakSmoke(t *testing.T) {
+	reg := observ.NewRegistry()
+	rep := Run(t, Config{
+		Matches: 2, ClientsEach: 2, Duration: 2 * time.Second,
+		InputHz: 30, Soak: true, RotateEvery: 500 * time.Millisecond,
+	}, reg)
+	t.Logf("\n%s", rep)
+	if rep.ClientErrors != 0 || rep.MatchAborts != 0 {
+		t.Fatalf("soak smoke not clean: errors=%d aborts=%d", rep.ClientErrors, rep.MatchAborts)
+	}
+	if rep.GoroutineMax < rep.GoroutinesBefore {
+		t.Fatalf("soak peak goroutines=%d < before=%d (sampler didn't run?)", rep.GoroutineMax, rep.GoroutinesBefore)
+	}
+	if rep.GoroutineLeaked(2) {
+		t.Fatalf("soak smoke goroutine leak: before=%d after=%d", rep.GoroutinesBefore, rep.GoroutinesAfter)
+	}
+}
+
 // TestLoad_ReportHelpers unit-tests the Report predicates.
 func TestLoad_ReportHelpers(t *testing.T) {
 	leak := Report{GoroutinesBefore: 10, GoroutinesAfter: 13}

@@ -122,6 +122,36 @@ func runLoad(cfg Config, reg *observ.Registry) (Report, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), cfg.Duration)
 	defer cancel()
 
+	// Soak mode: periodically sample goroutines + RSS for the whole run so
+	// an operator sees the trend live and we capture the peak goroutine
+	// count. (Full 24h soak is operator-run; the leak/RSS pass-fail uses the
+	// post-drain figures below.)
+	goroutineMax := before
+	sampleStop := make(chan struct{})
+	var sampleDone sync.WaitGroup
+	if cfg.Soak {
+		sampleDone.Add(1)
+		go func() {
+			defer sampleDone.Done()
+			t := time.NewTicker(cfg.RotateEvery)
+			defer t.Stop()
+			start := time.Now()
+			for {
+				select {
+				case <-sampleStop:
+					return
+				case <-t.C:
+					g := runtime.NumGoroutine()
+					if g > goroutineMax {
+						goroutineMax = g
+					}
+					fmt.Printf("soak t=%-6s goroutines=%d rss=%dKiB\n",
+						time.Since(start).Round(time.Second), g, rssBytes()/1024)
+				}
+			}
+		}()
+	}
+
 	var wg sync.WaitGroup
 	for _, mInfo := range matches {
 		url := wsBase + "/ws/match/" + mInfo.id
@@ -134,6 +164,8 @@ func runLoad(cfg Config, reg *observ.Registry) (Report, error) {
 		}
 	}
 	wg.Wait() // all clients return when the run context (Duration) expires
+	close(sampleStop)
+	sampleDone.Wait()
 
 	teardown()
 
@@ -171,6 +203,7 @@ func runLoad(cfg Config, reg *observ.Registry) (Report, error) {
 		BytesOutPerClientPerSec: kbps(stats.bytesOut.Load()),
 		GoroutinesBefore:        before,
 		GoroutinesAfter:         after,
+		GoroutineMax:            goroutineMax,
 		RSSStartBytes:           rssStart,
 		RSSEndBytes:             rssEnd,
 		ClientErrors:            int(stats.errors.Load()),

@@ -1,4 +1,4 @@
-.PHONY: build test test-race test-testhooks test-synthetic test-load vet fmt clean run check-frozen
+.PHONY: build test test-race test-testhooks test-synthetic test-load perf-nightly vet fmt clean run check-frozen
 
 BIN := isnipes
 
@@ -39,6 +39,12 @@ test-synthetic:
 # not slow the default unit run. Use `go test -short` locally for a 5s pass.
 test-load:
 	go test -race -count=1 -tags loadtest ./internal/loadtest/...
+
+# PHASE8.md §9 — nightly perf (NOT PR-blocking): 512-player load, regression
+# vs testdata/perf_baseline.json (exits non-zero on regression). The 24h soak
+# is a separate operator run: `go run scripts/loadtest.go --soak`.
+perf-nightly:
+	go run scripts/loadtest.go --nightly
 
 # PHASE7.md DoD #2 — fail if a frozen wire-schema / sim file changed.
 check-frozen:

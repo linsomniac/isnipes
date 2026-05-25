@@ -1,0 +1,49 @@
+# PHASE8.md §14 — PR gates. The frozen path-diff gate + the sha-manifest
+# guard (via make test-race) together enforce the no-wire/no-sim-change
+# invariant; the rest are the unit/integration/e2e/load gates.
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  build-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # need the base ref for the path-diff gate
+
+      - name: Frozen path-diff gate
+        if: >-
+          github.event_name == 'pull_request' &&
+          !contains(github.event.pull_request.labels.*.name, 'frozen-change-approved')
+        run: bash scripts/check-frozen-paths.sh "origin/${{ github.base_ref }}"
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.26'
+
+      - run: go vet ./...
+      - name: Race + frozen-manifest guard
+        run: make test-race
+      - run: make test-testhooks
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - run: npm -C web ci
+      - name: Client unit tests + coverage
+        run: npm -C web run test:coverage
+      - name: Client e2e (Playwright, Chromium)
+        run: npm -C web run test:e2e
+
+      - name: Embed build + embed-tag default-asset test
+        run: |
+          make build
+          go test -tags embed ./cmd/isnipes/...
+
+      - name: Smoke load (16 players × 60s)
+        run: make test-load

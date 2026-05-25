@@ -47,6 +47,7 @@ type Report struct {
 	BytesOutPerClientPerSec float64 // KB/s
 	GoroutinesBefore        int
 	GoroutinesAfter         int
+	GoroutineMax            int // peak observed during a soak run (0 otherwise)
 	RSSStartBytes           uint64
 	RSSEndBytes             uint64
 	ClientErrors            int
