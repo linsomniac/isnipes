@@ -520,6 +520,17 @@ func (l *Lobby) handleStartMatch(s *Session, sm proto.StartMatch) {
 		l.sendError(s, proto.LobbyErrBadRequest, "room not in OPEN state")
 		return
 	}
+	// AIDEV-NOTE: Propagate the room's selected level into the match. If
+	// this is dropped, MatchConfig.LevelLetter defaults to 0, which
+	// startOrAbort (match.go) treats as Phase-2 PvP-only and sets
+	// NoGenerators — suppressing generators AND the snipes they emit, so no
+	// enemies appear at all. The level was validated at room creation, so a
+	// failure here is defensive only.
+	levelLetter, levelNumber, err := ValidateLevel(room.Level)
+	if err != nil {
+		l.sendError(s, proto.LobbyErrBadLevel, "room level invalid")
+		return
+	}
 	room.State = RoomStarting
 	// Allocate per-room EntityIDs and tokens.
 	matchID := newMatchID()
@@ -561,6 +572,8 @@ func (l *Lobby) handleStartMatch(s *Session, sm proto.StartMatch) {
 		MapWidth:    60,
 		MapHeight:   40,
 		PlayerSlots: pending,
+		LevelLetter: levelLetter,
+		LevelNumber: levelNumber,
 	}
 	if l.cfg.Registry != nil {
 		_, err := l.cfg.Registry.Create(mc)

@@ -323,6 +323,15 @@ func (m *Match) In() chan<- controlMsg { return m.in }
 // MatchID returns the configured match ID.
 func (m *Match) MatchID() string { return m.cfg.MatchID }
 
+// LevelLetter returns the configured level letter, or 0 for a Phase-2
+// PvP-only match (no generators/snipes). Set once at construction and
+// never mutated, so it is safe to read concurrently.
+func (m *Match) LevelLetter() byte { return m.cfg.LevelLetter }
+
+// LevelNumber returns the configured level number (1..9), or 0 when no
+// level table is active. Set once at construction; safe to read concurrently.
+func (m *Match) LevelNumber() int { return m.cfg.LevelNumber }
+
 // state / setState are the actor-internal getters; for race-free
 // external observation, see (*Match).State().
 func (m *Match) state() MatchState     { return MatchState(m.stateAtomic.Load()) }
