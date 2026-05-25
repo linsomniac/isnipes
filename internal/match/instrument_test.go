@@ -166,6 +166,42 @@ func TestMatch_OverBudgetSkipsNextSnapshot(t *testing.T) {
 	}
 }
 
+// TestMatch_JoinedGaugeBalancesUnderBackpressure — a slot dropped for
+// outbound backpressure releases its gauge contribution, and termination
+// releases the rest with no double-count. (codex)
+func TestMatch_JoinedGaugeBalancesUnderBackpressure(t *testing.T) {
+	gauge := 0
+	m := &Match{
+		slots:         make(map[sim.EntityID]*Slot),
+		onJoinedDelta: func(d int) { gauge += d },
+	}
+	s1 := &Slot{PlayerID: 1, Joined: true, out: make(chan OutboundFrame, 1), closed: make(chan struct{})}
+	s2 := &Slot{PlayerID: 2, Joined: true, out: make(chan OutboundFrame, 1), closed: make(chan struct{})}
+	m.slots[1], m.slots[2] = s1, s2
+	m.adjustJoined(1) // simulate s1 join
+	m.adjustJoined(1) // simulate s2 join
+	if gauge != 2 {
+		t.Fatalf("after 2 joins gauge=%d want 2", gauge)
+	}
+
+	// Fill s1's queue so the next send backpressures and drops it.
+	s1.out <- OutboundFrame{}
+	m.sendFrameTo(s1, proto.MsgEvent, proto.Event{Kind: 1})
+	if gauge != 1 {
+		t.Fatalf("after backpressure drop gauge=%d want 1", gauge)
+	}
+	if s1.Joined {
+		t.Fatal("s1 still Joined after backpressure drop")
+	}
+
+	// Termination releases the still-joined s2; the already-dropped s1 is a
+	// no-op (no double-decrement).
+	m.releaseJoinedGauge()
+	if gauge != 0 {
+		t.Fatalf("after termination gauge=%d want 0 (unbalanced)", gauge)
+	}
+}
+
 // TestRegistry_StopAll — StopAll ends every live match cleanly, drains the
 // registry deterministically, and (crucially for the DoD #5 leak check)
 // leaves NO tail goroutine per match. (DoD #5 support)

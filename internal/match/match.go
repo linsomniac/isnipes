@@ -922,7 +922,6 @@ func (m *Match) endMatch(reason uint8, winner sim.EntityID) {
 	}
 	m.setState(StateEnded)
 	m.endedAt = m.clock()
-	m.releaseJoinedGauge()
 
 	finalTick := m.sim.ServerTick()
 	m.broadcastEvent(proto.Event{
@@ -944,6 +943,9 @@ func (m *Match) endMatch(reason uint8, winner sim.EntityID) {
 		m.sendFrameTo(slot, proto.MsgMatchOver, mo)
 		m.closeSlot(slot)
 	}
+	// After the final send (sendFrameTo may have dropped slow slots): release
+	// the gauge for everyone still joined.
+	m.releaseJoinedGauge()
 	m.drainInboxAfterEnd()
 }
 
@@ -999,17 +1001,25 @@ func (m *Match) adjustJoined(delta int) {
 	}
 }
 
-// releaseJoinedGauge decrements the gauge by the number of still-joined
-// slots at match termination. Each termination path is guarded by the
-// StateEnded check, so this runs once and cannot double-release.
-func (m *Match) releaseJoinedGauge() {
-	n := 0
-	for _, s := range m.slots {
-		if s.Joined {
-			n++
-		}
+// markUnjoined transitions a slot from joined to not-joined exactly once,
+// decrementing the gauge. Idempotent: a slot already unjoined (e.g. by
+// backpressure) is a no-op, so it can be called freely at every exit point
+// (backpressure drop, explicit leave, grace-expiry drop, termination)
+// without double-decrementing.
+func (m *Match) markUnjoined(slot *Slot) {
+	if slot.Joined {
+		slot.Joined = false
+		m.adjustJoined(-1)
 	}
-	m.adjustJoined(-n)
+}
+
+// releaseJoinedGauge unjoins every still-joined slot at termination. Called
+// AFTER the final-frame send loop so MatchOver still reaches joined slots;
+// slots already dropped by backpressure during that send are no-ops here.
+func (m *Match) releaseJoinedGauge() {
+	for _, s := range m.slots {
+		m.markUnjoined(s)
+	}
 }
 
 // shutdown ends the match gracefully: no SERVER_ERROR MatchOver (so the
@@ -1039,7 +1049,6 @@ func (m *Match) abort(reason string) {
 	}
 	m.setState(StateEnded)
 	m.endedAt = m.clock()
-	m.releaseJoinedGauge()
 	if m.sim != nil {
 		// Best-effort MatchOver. One match_end broadcast, then one
 		// MatchOver per slot.
@@ -1066,6 +1075,9 @@ func (m *Match) abort(reason string) {
 			}
 		}
 	}
+	// After the final send: release the gauge for everyone still joined
+	// (slots dropped by backpressure above already released themselves).
+	m.releaseJoinedGauge()
 	// Drain any pending inbox messages so SubmitJoin callers don't
 	// block forever waiting for a reply.
 	m.drainInboxAfterEnd()
@@ -1090,7 +1102,7 @@ func (m *Match) handleClose(v ctlClose) {
 		Target: uint32(v.PlayerID),
 		Reason: v.Reason,
 	})
-	slot.Joined = false
+	m.markUnjoined(slot)
 	m.closeSlot(slot)
 }
 
@@ -1193,8 +1205,8 @@ func (m *Match) sendFrameTo(slot *Slot, t proto.MsgType, msg encodable) {
 	select {
 	case slot.out <- OutboundFrame{Type: t, Payload: payload}:
 	default:
-		// Queue full: drop the slot.
-		slot.Joined = false
+		// Queue full: drop the slot (and release its gauge contribution).
+		m.markUnjoined(slot)
 		m.closeSlot(slot)
 	}
 }
