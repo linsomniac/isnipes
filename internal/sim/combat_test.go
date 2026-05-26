@@ -73,10 +73,10 @@ func TestProjectileHitsWallAtExpectedTick(t *testing.T) {
 		t.Fatalf("no kill event for projectile")
 	}
 	delta := killTick - int32(startTick)
-	// Centre-placed player + spawn-then-motion ordering at the doubled speed
-	// lands the wall impact ~18 motion ticks out; allow a small band.
-	if delta < 15 || delta > 22 {
-		t.Fatalf("kill at startTick+%d, want 15..22", delta)
+	// projectileSpeed=224: the wall (5 tiles east of the centre-placed player)
+	// is reached in ~5 motion ticks; allow a small band.
+	if delta < 3 || delta > 8 {
+		t.Fatalf("kill at startTick+%d, want 3..8", delta)
 	}
 }
 
@@ -101,8 +101,8 @@ func TestProjectileHitsEntityHeadOn(t *testing.T) {
 	// Fire E from player 1.
 	_, _ = s.Tick([]PlayerInput{{PlayerID: 1, FireDir: DirE}})
 	fireTick := s.ServerTick()
-	// At the doubled speed (and the wider 2-tile player-2 hitbox) the head-on
-	// impact lands ~16 motion ticks out; allow a small band.
+	// At projectileSpeed=224 (and the 2-tile player-2 hitbox) the head-on
+	// impact lands ~5 motion ticks out; allow a small band.
 	var hitTick uint32 = 0
 	for i := 0; i < 100; i++ {
 		evs, _ := s.Tick(nil)
@@ -115,20 +115,19 @@ func TestProjectileHitsEntityHeadOn(t *testing.T) {
 		t.Fatalf("no hit event for player 2")
 	}
 	delta := int(hitTick) - int(fireTick)
-	if delta < 13 || delta > 20 {
-		t.Fatalf("hit at fire+%d, want ~16", delta)
+	if delta < 3 || delta > 8 {
+		t.Fatalf("hit at fire+%d, want ~5", delta)
 	}
 }
 
 func TestProjectileExpiresAfter90Ticks(t *testing.T) {
 	s := newFixtureSim(t)
-	// Use a big enough fixture maze so the projectile won't hit a wall.
-	W, H := s.Width(), s.Height()
+	// projectileSpeed=224 → a 90-tick flight covers ~78.75 tiles, so the
+	// projectile needs the max 120-wide runway (the 60-wide fixture would
+	// wall-hit first). N/S would hit the 40-tall map's wall first, so fire E.
+	W, H := 120, 40
 	OverrideMazeForTest(s, W, H, allFloorMaze(W, H))
 	PlacePlayerForTest(s, 1, int32(10*subtilePerTile+subtilePerTile/2), int32(20*subtilePerTile+subtilePerTile/2))
-	// Fire E: at projectileSpeed=64 a 90-tick flight covers ~22.5 tiles, which
-	// needs the 60-wide map's horizontal runway (N/S would hit the 40-tall
-	// map's wall first).
 	_, _ = s.Tick([]PlayerInput{{PlayerID: 1, FireDir: DirE}})
 	fireTick := s.ServerTick()
 	projID := LiveProjectileIDsForTest(s)[0]
@@ -319,12 +318,12 @@ killed:
 
 func TestProjectileGetsFull90MotionTicks(t *testing.T) {
 	s := newFixtureSim(t)
-	W, H := s.Width(), s.Height()
+	// projectileSpeed=224 → a 90-tick flight covers ~78.75 tiles; use the max
+	// 120-wide runway so the projectile expires before any wall hit. Fire E
+	// (N/S would hit the 40-tall map's wall first).
+	W, H := 120, 40
 	OverrideMazeForTest(s, W, H, allFloorMaze(W, H))
 	PlacePlayerForTest(s, 1, int32(10*subtilePerTile+subtilePerTile/2), int32(20*subtilePerTile+subtilePerTile/2))
-	// Fire E: at projectileSpeed=64 a 90-tick flight covers ~22.5 tiles, which
-	// needs the 60-wide map's horizontal runway (N/S would hit the 40-tall
-	// map's wall first).
 	_, _ = s.Tick([]PlayerInput{{PlayerID: 1, FireDir: DirE}})
 	fireTick := s.ServerTick()
 	projID := LiveProjectileIDsForTest(s)[0]

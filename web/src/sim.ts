@@ -8,11 +8,11 @@
 // oracle; both sides parity-test against it.
 
 export const SUBTILE_PER_TILE = 256;
-export const PLAYER_SPEED = 32;
-export const PLAYER_TURBO_SPEED = 64;
+export const PLAYER_SPEED = 112;
+export const PLAYER_TURBO_SPEED = 224;
 export const PLAYER_HALF_EXT = 256;
 export const FIRE_COOLDOWN_TICKS = 6;
-export const PROJECTILE_SPEED = 64;
+export const PROJECTILE_SPEED = 224;
 export const PROJECTILE_LIFETIME = 90;
 export const GENERATOR_HALF_EXT = 256;
 export const PROJECTILE_HALF_EXT = 48;

@@ -46,7 +46,7 @@ quietly drop a requirement.
 | Players can move and shoot | §3.3, §3.4 |
 | Shots are deadly to snipes, generators, and other players | §3.2 (HP), §3.4 (friendly fire on) |
 | Normal and turbo movement speeds | §3.3 |
-| Turbo speed equals shot speed | §3.3 (both are `32` subtile units/tick) |
+| Turbo speed equals shot speed | §3.3 (both are `224` subtile units/tick) |
 | Tests through development for robust/reliable behavior | §8 per-phase tests, §9 strategy |
 
 ---
@@ -169,13 +169,17 @@ is ~2× a snipe); the parenthetical is the pre-revamp value.
 
 - **Tick rate:** simulation runs at **30 Hz** (33.3 ms per tick). Determinism
   requires fixed timestep, never variable.
-- **Speeds (in subtile units per tick; MAZE_REVAMP.md ×2, was-value in parens):**
-  - Player normal speed: 32 (was 16).
-  - Player turbo speed: 64 (was 32) — **identical to projectile
-    speed**, per the original. Locks the player into a single direction
-    while turbo is held (no instant 180s at full speed).
-  - Snipe speed: 24 (was 12; slower than a non-turbo player but they have numbers).
-  - Projectile speed: 64 (was 32; = player turbo).
+- **Speeds (in subtile units per tick):**
+  - Player normal speed: 112 (3.5× the MAZE_REVAMP base of 32, for lively
+    traversal of the wide-corridor map).
+  - Player turbo speed: 224 — **identical to projectile speed**, per the
+    original. Locks the player into a single direction while turbo is held
+    (no instant 180s at full speed).
+  - Snipe speed: 24 (slower than a non-turbo player but they have numbers).
+  - Projectile speed: 224 (= player turbo).
+  - **Cap:** every per-axis step stays < `subtilePerTile` (256). The wall
+    sweep checks only the destination tile, so a ≥256 step could tunnel a
+    1-tile wall; a true 4× would require a continuously-swept wall check.
 - **Input model:** 8-way intended direction (N, NE, E, SE, S, SW, W, NW) +
   turbo flag + fire-direction-or-none. Continuous position update each tick:
   `pos += speed * unit(dir)`.
@@ -193,7 +197,7 @@ is ~2× a snipe); the parenthetical is the pre-revamp value.
 - Firing: a player fires one projectile in one of 8 directions; cooldown
   **6 ticks (200 ms)**. Cannot fire while turbo'ing (per original feel —
   "use turbo to run away").
-- Projectiles travel in a straight line at speed 32; despawn on wall hit
+- Projectiles travel in a straight line at speed 224; despawn on wall hit
   or after 90 ticks (3 s) max lifetime.
 - Hit detection: at each tick, the projectile's swept segment is tested
   against all entity hitboxes. First hit (front-of-line) registers; the

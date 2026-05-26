@@ -100,6 +100,24 @@ func ClearSpawnInvulnForTest(s *Sim, id EntityID) {
 	}
 }
 
+// SetPlayerInvulnForTest makes a player spawn-invulnerable for the next
+// `ticks` sim ticks (sets both FlagSpawnInvuln and the timer so step 8.5's
+// auto-clear doesn't fire). A snipe still acquires and chases it
+// (findFirstVisiblePlayer ignores invuln) but its projectile cannot kill it
+// (resolveProjectile skips invuln targets) — used by AI-state tests where the
+// fast projectile would otherwise eliminate a point-blank target before the
+// transition is observed.
+func SetPlayerInvulnForTest(s *Sim, id EntityID, ticks uint32) {
+	idx := s.store.findByID(id)
+	if idx < 0 {
+		panic("SetPlayerInvulnForTest: unknown id")
+	}
+	s.store.slots[idx].Flags |= FlagSpawnInvuln
+	if ps, ok := s.store.players[id]; ok {
+		ps.spawnInvulnUntil = s.serverTick + ticks
+	}
+}
+
 // PlaceGeneratorForTest spawns a generator at a chosen tile centre.
 func PlaceGeneratorForTest(s *Sim, x, y int32) EntityID {
 	id, ok := s.store.allocID()

@@ -146,12 +146,18 @@ const (
 	maxInFlightProjectiles = 64
 	playerHP               = 1
 	generatorHP            = 3
-	playerSpeed            = 32
-	playerTurboSpeed       = 64
-	projectileSpeed        = 64
-	projectileLifetime     = 90
-	fireCooldownTicks      = 6
-	respawnTimerTicks      = 90
+	// Movement speeds (subtile units/tick). 3.5× the post-MAZE_REVAMP base so
+	// the player traverses the wide-corridor map at a lively pace. Capped well
+	// under subtilePerTile (256): the single-lead-edge wall sweep in
+	// moveAndSlide only checks the destination tile, so a per-axis step ≥ 256
+	// could tunnel a 1-tile wall. Turbo == projectileSpeed is preserved (SPEC
+	// §3.3): a turbo player never outruns their own shot.
+	playerSpeed        = 112
+	playerTurboSpeed   = 224
+	projectileSpeed    = 224
+	projectileLifetime = 90
+	fireCooldownTicks  = 6
+	respawnTimerTicks  = 90
 
 	playerHalfExt     = 256
 	generatorHalfExt  = 256

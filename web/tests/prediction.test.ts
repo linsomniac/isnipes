@@ -238,7 +238,7 @@ describe("stepPlayer deterministic mirror", () => {
     const c = tileCentre(10, 10);
     const init = makeInitialPlayer(c.x, c.y);
     const out = stepPlayer(init, { dir: Dir.E, turbo: false }, allFloorMaze(), []);
-    expect(out.x).toBe(c.x + 32); // PLAYER_SPEED (MAZE_REVAMP.md ×2)
+    expect(out.x).toBe(c.x + 112); // PLAYER_SPEED (3.5× base)
     expect(out.y).toBe(c.y);
   });
 
@@ -246,7 +246,7 @@ describe("stepPlayer deterministic mirror", () => {
     const c = tileCentre(10, 10);
     const init = makeInitialPlayer(c.x, c.y);
     const out = stepPlayer(init, { dir: Dir.E, turbo: true }, allFloorMaze(), []);
-    expect(out.x).toBe(c.x + 64); // PLAYER_TURBO_SPEED
+    expect(out.x).toBe(c.x + 224); // PLAYER_TURBO_SPEED (2× base)
   });
 
   test("turbo locks direction (codex sweep #3)", () => {

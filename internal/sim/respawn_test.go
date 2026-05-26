@@ -52,13 +52,17 @@ killed:
 			if ps.LastDir != DirIdle {
 				t.Fatalf("lastDir not Idle: %d", ps.LastDir)
 			}
-			// Send turbo + W on next tick; should move W.
+			// A fresh turbo+W must be honored (the lock cleared) — the player
+			// moves west from its respawn tile. Compare to the respawn position
+			// over a single tick: at the 3.5× turbo speed two consecutive ticks
+			// can both pin against the left wall when the respawn spawn tile
+			// sits near it, but one tick from any spawn tile (≥ tile 2) still
+			// advances west.
+			x0 := e.X
 			_, _ = s.Tick([]PlayerInput{{PlayerID: 2, Dir: DirW, Turbo: true}})
 			ex, _ := EntityRawForTest(s, 2)
-			_, _ = s.Tick([]PlayerInput{{PlayerID: 2, Dir: DirW, Turbo: true}})
-			ey, _ := EntityRawForTest(s, 2)
-			if ey.X >= ex.X {
-				t.Fatalf("post-respawn W input ignored: x %d -> %d", ex.X, ey.X)
+			if ex.X >= x0 {
+				t.Fatalf("post-respawn turbo+W did not move west: x %d -> %d", x0, ex.X)
 			}
 			return
 		}

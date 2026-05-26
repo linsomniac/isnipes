@@ -60,6 +60,10 @@ func TestSnipePatrolToChase(t *testing.T) {
 	// Player at (12, 10); snipe at (10, 10) — Chebyshev=2, LOSRadius=6
 	// after Easy bucket.
 	s := newAIFixtureSim(t, 12, 10)
+	// Keep the point-blank target alive: at projectileSpeed=224 the snipe's
+	// shot would otherwise kill it within the observation window, reverting the
+	// snipe to patrol before we read the state.
+	SetPlayerInvulnForTest(s, 1, 1000)
 	snipeID := SpawnSnipeForTest(s, 0, 10, 10)
 	// Drain spawn-invuln (16 ticks) then run a few patrol ticks so
 	// the LOS scan engages.
@@ -77,6 +81,9 @@ func TestSnipePatrolToChase(t *testing.T) {
 
 func TestSnipeChaseToPatrolOnLOSLost(t *testing.T) {
 	s := newAIFixtureSim(t, 12, 10)
+	// Keep the point-blank target alive through the chase observation (see
+	// TestSnipePatrolToChase) — the move-away below clears invuln anyway.
+	SetPlayerInvulnForTest(s, 1, 1000)
 	snipeID := SpawnSnipeForTest(s, 0, 10, 10)
 	// Drain spawn-invuln + enter chase.
 	for i := 0; i < 20; i++ {

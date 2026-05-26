@@ -27,8 +27,14 @@ import {
 import { buildScene, isSceneName, type MatchScene, type LobbyScene } from "./scenes.js";
 
 const CLIENT_VERSION = "v0";
-const CANVAS_W = 640;
-const CANVAS_H = 480;
+// Logical render resolution = the fixed slice of maze always shown: at
+// render.ts TILE_PX=32 that's 1280/32 × 960/32 = 40 × 30 tiles — 2× the prior
+// 20 × 15 view (a wider zoom-out). The canvas backing store stays this size;
+// fitCanvas() only scales the CSS display size to fill the window (preserving
+// the 4:3 aspect, letterboxed). All camera/render math keys off the backing
+// store, so the visible tile count is independent of window size.
+const CANVAS_W = 1280;
+const CANVAS_H = 960;
 
 function wsBase(): string {
   const scheme = location.protocol === "https:" ? "wss://" : "ws://";
@@ -181,6 +187,61 @@ function labeled(name: string, control: HTMLElement): HTMLElement {
 
 function text(s: string): Text {
   return document.createTextNode(s);
+}
+
+// injectMatchStyles installs the in-match layout once: the match section fills
+// the viewport (letterbox black), the game canvas is centred and scaled by
+// fitCanvas, and the HUD/minimap/dialogs float as overlays so the playfield can
+// use the whole window. Scoped to #match, so the lobby is untouched.
+function injectMatchStyles(): void {
+  if (document.getElementById("isnipes-match-style")) return;
+  const style = document.createElement("style");
+  style.id = "isnipes-match-style";
+  style.textContent = `
+#match { position: fixed; inset: 0; background: #000; overflow: hidden; }
+#match #game { position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); background: #000; }
+#match #minimap { position: absolute; top: 8px; right: 8px; width: 180px; height: 120px; border: 1px solid #2b3a55; background: #111; image-rendering: pixelated; }
+#match [data-testid="hud-stats"] { position: absolute; top: 8px; left: 8px; margin: 0; color: #cfe3ff; font: 14px/1.4 monospace; text-shadow: 0 0 4px #000, 0 0 4px #000; pointer-events: none; }
+#match [data-testid="chat"] { position: absolute; left: 8px; bottom: 36px; max-width: 44ch; color: #dfe7ff; font: 13px/1.35 monospace; text-shadow: 0 0 4px #000; }
+#match [data-testid="chat-input"] { position: absolute; left: 8px; bottom: 8px; width: 44ch; }
+#match [data-testid="scoreboard"], #match [data-testid="end-dialog"] { position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); background: rgba(8, 12, 20, 0.92); color: #eaf2ff; padding: 16px 24px; border: 1px solid #2b3a55; border-radius: 6px; font: 14px/1.5 monospace; min-width: 240px; }
+`;
+  document.head.append(style);
+}
+
+// fitCanvas scales the fixed-resolution canvas (CANVAS_W × CANVAS_H backing
+// store) to fill the window while preserving its aspect ratio, letterboxing the
+// remainder. Only the CSS display size changes — the backing store, and thus
+// the visible tile count, is window-independent (the user's "always show the
+// same amount of the maze, just scale it to fit").
+function fitCanvas(canvas: HTMLCanvasElement): void {
+  const aspect = CANVAS_W / CANVAS_H;
+  const ww = window.innerWidth;
+  const wh = window.innerHeight;
+  let w = ww;
+  let h = Math.round(ww / aspect);
+  if (h > wh) {
+    h = wh;
+    w = Math.round(wh * aspect);
+  }
+  canvas.style.width = `${w}px`;
+  canvas.style.height = `${h}px`;
+}
+
+// toggleFullscreen flips the document in/out of fullscreen (bound to "f"
+// in-match). The fullscreenchange listener re-runs fitCanvas afterwards.
+function toggleFullscreen(): void {
+  try {
+    if (document.fullscreenElement) {
+      const p = document.exitFullscreen?.();
+      if (p) p.catch(() => {});
+    } else {
+      const p = document.documentElement.requestFullscreen?.();
+      if (p) p.catch(() => {});
+    }
+  } catch {
+    /* fullscreen unsupported */
+  }
 }
 
 const SERVER_KEY = "isnipes.server";
@@ -424,6 +485,9 @@ class MatchRunner {
   private keydown = (e: KeyboardEvent): void => {
     // Chat input has focus → let the field handle typing.
     if (document.activeElement === this.ui.chatInput) return;
+    // "f" toggles fullscreen (handled here, before input, so it isn't also
+    // captured as a held key).
+    if (e.code === "KeyF") { e.preventDefault(); toggleFullscreen(); return; }
     if (e.code === "Tab") { e.preventDefault(); this.hud.showScoreboard = true; return; }
     if (e.code === this.input.getBindings().chatOpen) {
       e.preventDefault();
@@ -565,9 +629,15 @@ function renderMatchScene(ui: UI, scene: MatchScene, settings: Settings): void {
 
 async function boot(): Promise<void> {
   const settings = loadSettings();
+  injectMatchStyles();
   const ui = buildDOM(settings);
   renderServerList(ui, settings);
   applySettingsHandlers(ui, settings);
+  // Scale the playfield to fill the window (fixed aspect, letterboxed) now and
+  // whenever the window or fullscreen state changes.
+  fitCanvas(ui.canvas);
+  window.addEventListener("resize", () => fitCanvas(ui.canvas));
+  document.addEventListener("fullscreenchange", () => fitCanvas(ui.canvas));
 
   const schemaChecksum = await computeSchemaChecksum();
 
