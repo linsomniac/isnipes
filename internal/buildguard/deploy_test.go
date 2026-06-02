@@ -74,14 +74,14 @@ func TestDeploy_FilesPresent(t *testing.T) {
 		"--require-tls", "--admin-addr", "/metrics")
 }
 
-// TestDeploy_CIWiring — the CI/nightly workflows + the frozen path-diff gate
+// TestDeploy_CIWiring — the CI/perf workflows + the frozen path-diff gate
 // exist and wire the real make targets/scripts (DoD #20). YAML is checked by
 // content (no YAML dep); a live GitHub run is operator-side.
 func TestDeploy_CIWiring(t *testing.T) {
 	root := repoRoot(t)
 
 	for _, rel := range []string{
-		".github/workflows/ci.yml", ".github/workflows/nightly.yml",
+		".github/workflows/ci.yml", ".github/workflows/perf.yml",
 		"scripts/check-frozen-paths.sh",
 	} {
 		if _, err := os.Stat(filepath.Join(root, rel)); err != nil {
@@ -95,8 +95,8 @@ func TestDeploy_CIWiring(t *testing.T) {
 		"make test-race", "make test-testhooks", "make test-load",
 		"test:coverage", "test:e2e", "-tags embed")
 
-	nightly := readRepoFile(t, root, ".github/workflows/nightly.yml")
-	mustContain(t, ".github/workflows/nightly.yml", nightly,
+	perf := readRepoFile(t, root, ".github/workflows/perf.yml")
+	mustContain(t, ".github/workflows/perf.yml", perf,
 		"make perf-nightly", "--soak")
 
 	// The path-diff gate must actually guard the frozen paths + itself.

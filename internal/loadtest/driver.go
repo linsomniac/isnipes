@@ -23,6 +23,22 @@ import (
 // time to reach steady state before we start watching for unbounded growth.
 const soakWarmupDuration = 2 * time.Minute
 
+// soakSamplerCap bounds the harness's per-observation tick/latency samplers in
+// soak mode. The exact (unbounded) RecordingSampler is right for the short
+// nightly/smoke gate, but over a long soak it retains O(duration) samples
+// (~9.6k/s at 64×8 = 1.9k tick + 7.7k latency), so the measuring instrument
+// outgrows the server it measures and the RSS leak gate fires on the harness's
+// own growth — a false positive. The cap is reached well inside
+// soakWarmupDuration (tick at ~1.9k/s fills 100k in <1m), so the post-warmup
+// steady-state trend the gate watches sees a constant sampler footprint, and
+// the ring then overwrites in place (no allocation, quiescing GC churn). Soak
+// gates only on goroutines and RSS, never on these quantiles, so the trailing
+// window the cap leaves in the printed report is fine.
+// AIDEV-NOTE: do NOT remove this bound — see git history (c04aa3b) and
+// client.go's sendAt bound; an unbounded harness sampler reintroduces the
+// soak-RSS false positive this was added to kill.
+const soakSamplerCap = 100_000
+
 // fanOut sends each tick observation to every observer (the exact
 // RecordingSampler for the gate AND the registry histogram for /metrics).
 type fanOut []match.TickObserver
@@ -70,6 +86,9 @@ func runLoad(cfg Config, reg *observ.Registry) (Report, error) {
 	rssStart := rssBytes()
 
 	rec := &observ.RecordingSampler{} // exact tick P99 for the gate
+	if cfg.Soak {
+		rec.SetCap(soakSamplerCap) // bound before the registry starts ticking
+	}
 	var ticksOver, drops atomic.Uint64
 	matchReg := match.NewRegistry(match.RegistryConfig{
 		MaxConcurrentMatches: cfg.Matches + 4,
@@ -124,6 +143,9 @@ func runLoad(cfg Config, reg *observ.Registry) (Report, error) {
 	}
 
 	stats := &clientStats{}
+	if cfg.Soak {
+		stats.lat.SetCap(soakSamplerCap) // bound before any client connects
+	}
 	wsBase := strings.Replace(ts.URL, "http://", "ws://", 1)
 	ctx, cancel := context.WithTimeout(context.Background(), cfg.Duration)
 	defer cancel()

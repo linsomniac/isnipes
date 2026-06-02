@@ -161,12 +161,38 @@ type Sampler interface{ Observe(d time.Duration) }
 type RecordingSampler struct {
 	mu      sync.Mutex
 	samples []time.Duration
+	cap     int // 0 = unbounded (exact); >0 = retain only the most-recent cap
+	next    int // ring cursor, used once len(samples) == cap
 }
 
-// Observe appends a sample.
+// SetCap bounds retention to the most-recent n observations (0, the default,
+// keeps every sample for an exact quantile). Once n are held, each further
+// Observe overwrites the oldest in place — constant memory, no allocation.
+// Call before the first Observe. Intended for long soak runs, where unbounded
+// exact retention is itself a leak: the measuring instrument must not outgrow
+// the server it measures (see the loadtest driver and client.go's sendAt
+// bound). Quantiles then cover a trailing window rather than the whole run.
+func (s *RecordingSampler) SetCap(n int) {
+	s.mu.Lock()
+	s.cap = n
+	s.mu.Unlock()
+}
+
+// Observe records a sample. Unbounded by default; with a cap set it retains
+// only the most-recent cap samples via in-place ring overwrite. Quantile sorts
+// a copy, so the ring's write order does not affect the result.
 func (s *RecordingSampler) Observe(d time.Duration) {
 	s.mu.Lock()
-	s.samples = append(s.samples, d)
+	switch {
+	case s.cap <= 0 || len(s.samples) < s.cap:
+		s.samples = append(s.samples, d)
+	default:
+		s.samples[s.next] = d
+		s.next++
+		if s.next == s.cap {
+			s.next = 0
+		}
+	}
 	s.mu.Unlock()
 }
 

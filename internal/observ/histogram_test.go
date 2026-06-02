@@ -78,6 +78,41 @@ func TestObserv_RecordingSamplerExact(t *testing.T) {
 	}
 }
 
+// TestObserv_RecordingSamplerBounded — SetCap bounds retention to the most
+// recent N observations so a long soak run cannot let the measuring instrument
+// outgrow the server it measures. Under the cap it is still exact; past it,
+// Len plateaus at the cap and the retained window is the trailing tail.
+func TestObserv_RecordingSamplerBounded(t *testing.T) {
+	var s RecordingSampler
+	s.SetCap(100)
+
+	// Under the cap: identical to the unbounded sampler.
+	for i := 1; i <= 100; i++ {
+		s.Observe(time.Duration(i) * time.Millisecond)
+	}
+	if s.Len() != 100 {
+		t.Fatalf("at cap: Len=%d want 100", s.Len())
+	}
+	if q := s.Quantile(1.0); q != 100*time.Millisecond {
+		t.Fatalf("at cap: Quantile(1.0)=%v want 100ms", q)
+	}
+
+	// Past the cap: 901..1000ms remain, so Len holds at 100 and the floor of
+	// the retained window has advanced from 1ms to 901ms.
+	for i := 101; i <= 1000; i++ {
+		s.Observe(time.Duration(i) * time.Millisecond)
+	}
+	if s.Len() != 100 {
+		t.Fatalf("past cap: Len=%d want 100 (bounded)", s.Len())
+	}
+	if q := s.Quantile(1.0); q != 1000*time.Millisecond {
+		t.Fatalf("past cap: Quantile(1.0)=%v want 1000ms (newest retained)", q)
+	}
+	if q := s.Quantile(0.01); q != 901*time.Millisecond {
+		t.Fatalf("past cap: Quantile(0.01)=%v want 901ms (tail-window floor)", q)
+	}
+}
+
 // TestObserv_HistogramConcurrentObserve — race-free concurrent Observe;
 // total Count equals the number of observations. (run under -race)
 func TestObserv_HistogramConcurrentObserve(t *testing.T) {
