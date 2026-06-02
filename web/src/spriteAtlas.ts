@@ -58,6 +58,12 @@ const CELL = 48;
 const S = 3; // pixel unit (sprite-local px → atlas px)
 const HALF = CELL / 2;
 
+// The self ground-ring is a flattened halo wider than a marine, so its source
+// region is wider than CELL (an 80×48 band in the otherwise-empty selfRing row)
+// — otherwise the ring + its glow overflow a 48px cell and the blit crops it
+// at the sides/bottom. Height stays CELL because the ring is flattened.
+const RING_W = 80;
+
 // Walk is reduced to a 2-frame cycle (spec §2: "2-frame walk cycle"); the
 // renderer passes walkFrame()'s 0..3, we fold to the low bit.
 const WALK_FRAMES = 2;
@@ -377,7 +383,9 @@ function bakeHive(ctx: Ctx, cx: number, cy: number, stage: number, pulse: number
 // rather than the old hardcoded cyan literals.
 function bakeSelfRing(ctx: Ctx, cx: number, cy: number, color: string, bloom: boolean): void {
   ctx.save();
-  ctx.translate(cx, cy + 5 * S);
+  // Baked centered in its region; the renderer drops it to the marine's feet at
+  // blit time (so the ring can use the full region height without clipping).
+  ctx.translate(cx, cy);
   ctx.scale(1, 0.42);
   ctx.strokeStyle = rgba(color, 0.9);
   ctx.lineWidth = 2.5;
@@ -534,8 +542,8 @@ export function buildSpriteAtlas(palette: Palette, makeCanvas: AtlasCanvasFactor
     bakePoof(ctx, f * CELL + HALF, ROW.poof * CELL + HALF, f, bloom);
   }
 
-  // Self ring (single cell).
-  bakeSelfRing(ctx, HALF, ROW.selfRing * CELL + HALF, palette.selfRing, bloom);
+  // Self ring (wide non-square region; baked centered in the selfRing row).
+  bakeSelfRing(ctx, RING_W / 2, ROW.selfRing * CELL + HALF, palette.selfRing, bloom);
 
   return {
     image: surface,
@@ -546,7 +554,8 @@ export function buildSpriteAtlas(palette: Palette, makeCanvas: AtlasCanvasFactor
     projectile: () => cellAt(ROW.projectile, 0),
     muzzle: (frame) => cellAt(ROW.muzzle, Math.max(0, Math.min(MUZZLE_FLASH_TICKS - 1, frame | 0))),
     poof: (frame) => cellAt(ROW.poof, Math.max(0, Math.min(DEATH_POOF_TICKS - 1, frame | 0))),
-    selfRing: () => cellAt(ROW.selfRing, 0),
+    // Wider-than-CELL region so the flattened halo + glow isn't cropped.
+    selfRing: () => ({ sx: 0, sy: ROW.selfRing * CELL, sw: RING_W, sh: CELL }),
   };
 }
 

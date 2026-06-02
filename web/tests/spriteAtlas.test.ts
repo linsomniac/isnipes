@@ -121,7 +121,14 @@ describe("buildSpriteAtlas", () => {
     for (let f = 0; f < DEATH_POOF_TICKS; f++) check(atlas.poof(f));
     claim(atlas.poof(0));
     claim(atlas.selfRing());
-    check(atlas.selfRing());
+    // The self-ring is intentionally a wider, non-square region (flattened halo)
+    // so its glow isn't cropped — exempt from the square-cell check, but it must
+    // be a positive, grid-aligned region.
+    const ring = atlas.selfRing();
+    expect(ring.sw).toBeGreaterThan(atlas.cell); // wider than a square cell
+    expect(ring.sh).toBeGreaterThan(0);
+    expect(ring.sx % atlas.cell).toBe(0);
+    expect(ring.sy % atlas.cell).toBe(0);
   });
 
   test("frame lookups clamp out-of-range muzzle/poof indices", () => {

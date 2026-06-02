@@ -387,7 +387,7 @@ export class Renderer {
 
     // Self ground-ring first (under the marine).
     if (item.isSelf) {
-      this.blitCell(atlas.selfRing(), px, py, blitSizeForKind(1));
+      this.blitSelfRing(px, py);
     }
 
     let cell;
@@ -414,6 +414,23 @@ export class Renderer {
     const [px, py] = worldToScreen(cam, ov.x, ov.y);
     const cell = ov.kind === "muzzle" ? this.atlas.muzzle(ov.frame) : this.atlas.poof(ov.frame);
     this.blitCell(cell, px, py, OVERLAY_BLIT_PX);
+  }
+
+  // blitSelfRing draws the flattened ground-ring under the local player. The
+  // ring lives in a wider, non-square atlas region (so its glow isn't cropped),
+  // so it blits at the source aspect — not squashed into a square — and is
+  // dropped to the marine's feet. Sized a touch under the marine footprint so it
+  // reads as a halo at the feet, not a circle the player is clipped inside.
+  private blitSelfRing(px: number, py: number): void {
+    const cell = this.atlas.selfRing();
+    const w = TILE_PX * 2.5; // on-screen ring footprint width
+    const h = w * (cell.sh / cell.sw); // preserve the flattened aspect
+    const footY = TILE_PX * 0.5; // sit the ring at the marine's feet
+    this.ctx.drawImage(
+      this.atlas.image,
+      cell.sx, cell.sy, cell.sw, cell.sh,
+      px - w / 2, py - h / 2 + footY, w, h,
+    );
   }
 
   // blitCell draws an atlas cell centered at (px,py), scaled to `size` px.
