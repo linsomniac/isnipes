@@ -199,6 +199,11 @@ function injectMatchStyles(): void {
   style.id = "isnipes-match-style";
   style.textContent = `
 #match { position: fixed; inset: 0; background: #000; overflow: hidden; }
+/* AIDEV-NOTE: match-view wraps only absolutely-positioned children (canvas/HUD/
+   dialogs), so without this it collapses to 0px height and Playwright's
+   toBeVisible() (deeplink/play e2e) reports it hidden. inset:0 makes it fill
+   #match without moving #game (which stays centred on the same 1280x720 box). */
+#match [data-testid="match-view"] { position: absolute; inset: 0; }
 #match #game { position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); background: #000; }
 #match #minimap { position: absolute; top: 8px; right: 8px; width: 180px; height: 120px; border: 1px solid #2b3a55; background: #111; image-rendering: pixelated; }
 #match [data-testid="hud-stats"] { position: absolute; top: 8px; left: 8px; margin: 0; color: #cfe3ff; font: 14px/1.4 monospace; text-shadow: 0 0 4px #000, 0 0 4px #000; pointer-events: none; }
@@ -594,12 +599,21 @@ function testMode(): boolean {
 
 function renderScene(ui: UI, name: import("./scenes.js").SceneName, settings: Settings): void {
   const scene = buildScene(name);
+  // AIDEV-NOTE: scene-ready must mark a *visible* element. In a match scene the
+  // lobby is hidden and #match is position:fixed, so document.body collapses to
+  // 0px height — a marker on it reads as hidden and the golden match scenes time
+  // out. Mark the shown root instead: body for lobby (normal flow), #match for a
+  // match (fills the viewport). Both are test-gated, so prod (scene_guard) stays
+  // marker-free.
+  let readyRoot: HTMLElement;
   if (scene.kind === "lobby") {
     renderLobbyScene(ui, scene);
+    readyRoot = document.body;
   } else {
     renderMatchScene(ui, scene, settings);
+    readyRoot = ui.match;
   }
-  document.body.setAttribute("data-testid", "scene-ready");
+  readyRoot.setAttribute("data-testid", "scene-ready");
   ui.matchView.setAttribute("data-scene-ready", "true");
 }
 
