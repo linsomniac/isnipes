@@ -11,6 +11,7 @@ coverage.out
 /web/coverage/
 /node_modules/
 /.claude/
+/.superpowers/
 
 # Phase 8: embedded client build artifacts (produced by `make build`).
 /cmd/isnipes/dist/*
