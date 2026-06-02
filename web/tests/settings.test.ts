@@ -27,6 +27,7 @@ describe("settings persistence", () => {
       bindings: { ...PRESETS.modern, turbo: "KeyQ" },
       colorBlind: true,
       highContrast: true,
+      retroFx: false,
       masterVolume: 0.4,
       nick: "Ada",
       servers: ["wss://play.example.com"],
@@ -37,9 +38,24 @@ describe("settings persistence", () => {
     expect(back.bindings.turbo).toBe("KeyQ");
     expect(back.colorBlind).toBe(true);
     expect(back.highContrast).toBe(true);
+    expect(back.retroFx).toBe(false);
     expect(back.masterVolume).toBe(0.4);
     expect(back.nick).toBe("Ada");
     expect(back.servers).toEqual(["wss://play.example.com"]);
+  });
+
+  // §5f — retroFx defaults true when absent, and only an explicit `false`
+  // turns it off (any other value / missing key → on).
+  test("retroFx defaults true and round-trips", () => {
+    // default is true.
+    expect(defaultSettings().retroFx).toBe(true);
+    expect(loadSettings(fakeStorage()).retroFx).toBe(true);
+    // stored object without retroFx → defaults true.
+    const noKey = fakeStorage({ [SETTINGS_KEY]: JSON.stringify({ preset: "classic" }) });
+    expect(loadSettings(noKey).retroFx).toBe(true);
+    // explicit false persists.
+    const off = fakeStorage({ [SETTINGS_KEY]: JSON.stringify({ retroFx: false }) });
+    expect(loadSettings(off).retroFx).toBe(false);
   });
 
   test("TestSettings_DefaultsOnCorrupt", () => {

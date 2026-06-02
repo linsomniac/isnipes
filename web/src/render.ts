@@ -4,14 +4,48 @@
 // an OffscreenCanvas and blitted each frame (§6.5). Pure geometry
 // (camera, world↔screen, y-sort, visible range) is exported for unit
 // tests; the imperative draw path is thin.
+//
+// docs/superpowers/specs/2026-06-02-enhanced-graphics-design.md §5e, §6 —
+// Direction-D enhanced graphics: the flat-circle entity draw is replaced by
+// baked pixel-art atlas blits (per-player hue, walk cycle, L/R facing,
+// generator damage + pulse), a glowing self ground-ring under the local
+// player, muzzle/poof overlay blits, and an optional CRT scanline+vignette
+// pass. The heavy impure baking (neon maze, sprite atlas, CRT) lives in the
+// NON-covered modules (spriteAtlas.ts, crt.ts) so render.ts stays thin and the
+// "rasterize once, never in draw()" invariant holds: atlas/CRT/maze are all
+// built in the constructor / setMap / setPalette, never in draw().
 
 import { SUBTILE_PER_TILE, type MazeView, TileCode } from "./sim.js";
 import type { Entity } from "./proto.js";
 import type { Palette } from "./palette.js";
 import type { HudModel } from "./hud.js";
+import {
+  walkFrame, faceLeft, damageStage, genPulseFrame,
+} from "./anim.js";
+import {
+  buildSpriteAtlas, bakeNeonMaze, hueIndexForId, makeAtlasCanvas,
+  SNIPE_VARIANTS, type SpriteAtlas,
+} from "./spriteAtlas.js";
+import { buildCrtOverlay, type CrtOverlay } from "./crt.js";
 
 export const TILE_PX = 32;
 export const PX_PER_SUBTILE = TILE_PX / SUBTILE_PER_TILE;
+
+// GEN_MAX_HP: the BASE generator spawn hp (letters A..S; internal/sim/levels.go
+// generatorHPBase). Exposed as the default damageStage(hp, maxHp) denominator
+// and the seed for per-generator observed-max tracking.
+//
+// AIDEV-NOTE: brutal levels T..Z spawn generators at hp 5 (generatorHPBrutal),
+// not 3, so a fixed denominator made the brutal hive's damage sprite mis-track
+// true HP fraction (a 60%-HP brutal generator read as "healthy"). The wire
+// proto (frozen Entity = current hp only; MapInit/MatchStarted carry no level
+// letter or max-HP) gives the client no max-HP, so the Renderer derives each
+// generator's max from the highest hp it has been observed at — its spawn HP —
+// and uses that as the per-entity denominator (DrawItem.maxHp). This is a pure
+// function of the deterministic snapshot stream (no wall-clock), so golden
+// frames stay reproducible. See spec §5g (premise "hardcode 3" was wrong for
+// brutal) and the brutal-generator finding.
+export const GEN_MAX_HP = 3;
 
 // Camera: top-left world position (subtile coords) shown at the viewport
 // origin, plus the viewport size in CSS pixels.
@@ -34,12 +68,23 @@ export interface SelfPredicted {
   flags: number;
 }
 
+// A combat overlay resolved to a world position + animation frame, ready to
+// blit (spec §5e). browser.ts maps OverlayManager.active() → these by looking
+// up the anchor's position and computing frame = muzzleFrame/poofFrame(age).
+export interface ResolvedOverlay {
+  kind: "muzzle" | "poof";
+  x: number;
+  y: number;
+  frame: number;
+}
+
 export interface RenderState {
   map: MazeView | null;
   selfId: number;
   selfPredicted: SelfPredicted | null;
   entities: Entity[]; // interpolated non-self entities (subtile coords)
   renderTick: number;
+  overlays?: ResolvedOverlay[]; // resolved muzzle/poof overlays to blit
 }
 
 // computeCamera centers (selfX, selfY) in the viewport, clamped so the
@@ -72,7 +117,11 @@ export function sortEntitiesForDraw(entities: readonly Entity[]): Entity[] {
   return [...entities].sort((a, b) => (a.y - b.y) || (a.id - b.id));
 }
 
-// One drawable: world position, the entity kind, and the resolved color.
+// One drawable: world position, the entity kind, and the resolved color, plus
+// the per-entity data the atlas needs to pick a cell (spec §5e): id (→ hue),
+// facing (→ L/R mirror), vx/vy (→ walk-moving), hp (→ generator damage stage),
+// and isSelf (→ ground-ring + self hue). The original {x,y,kind,color} fields
+// are preserved so the existing buildDrawList test keeps passing.
 // `selfRank` (0 for non-self, 1 for self) breaks y-ties so the local
 // player draws just above a co-located other for visibility, while still
 // honoring the ascending-y depth order against entities further south.
@@ -81,7 +130,22 @@ export interface DrawItem {
   y: number;
   kind: number;
   color: string;
+  id: number;
+  facing: number;
+  vx: number;
+  vy: number;
+  hp: number;
+  // maxHp: the entity's spawn/maximum hp, used as the damageStage denominator
+  // (generators only). Defaults to GEN_MAX_HP; the Renderer overrides it with
+  // each generator's observed spawn HP so brutal (hp 5) hives track true HP.
+  maxHp: number;
+  isSelf: boolean;
 }
+
+// MaxHpLookup resolves an entity id to its observed spawn/maximum hp. Supplied
+// by the Renderer (which tracks the highest hp seen per generator); pure-frame
+// callers (tests) may omit it, falling back to GEN_MAX_HP.
+export type MaxHpLookup = (id: number, hp: number) => number;
 
 // colorForKind picks the palette slot for an entity kind (1=player,
 // 2=generator, 3=projectile, 4=snipe; see internal/sim/config.go).
@@ -111,19 +175,28 @@ export function radiusForKind(kind: number): number {
 // order (DoD #7 invariant applies to the local player too). Self is
 // colored with palette.self and, on a y-tie, sorts after a co-located
 // other (selfRank) so it stays visible without breaking depth ordering.
-export function buildDrawList(s: RenderState, palette: Palette): DrawItem[] {
-  const items: (DrawItem & { id: number; selfRank: number })[] = [];
+export function buildDrawList(s: RenderState, palette: Palette, maxHpOf?: MaxHpLookup): DrawItem[] {
+  const items: (DrawItem & { selfRank: number })[] = [];
   for (const e of s.entities) {
-    items.push({ x: e.x, y: e.y, kind: e.kind, color: colorForKind(e.kind, palette), id: e.id, selfRank: 0 });
+    items.push({
+      x: e.x, y: e.y, kind: e.kind, color: colorForKind(e.kind, palette),
+      id: e.id, facing: e.facing, vx: e.vx, vy: e.vy, hp: e.hp,
+      maxHp: maxHpOf ? maxHpOf(e.id, e.hp) : GEN_MAX_HP, isSelf: false,
+      selfRank: 0,
+    });
   }
   if (s.selfPredicted) {
+    // Self motion isn't carried on SelfPredicted (spec §5e accepts rendering
+    // the local player idle when velocity is unavailable): vx/vy = 0.
     items.push({
-      x: s.selfPredicted.x, y: s.selfPredicted.y, kind: 1,
-      color: palette.self, id: s.selfId, selfRank: 1,
+      x: s.selfPredicted.x, y: s.selfPredicted.y, kind: 1, color: palette.self,
+      id: s.selfId, facing: s.selfPredicted.facing, vx: 0, vy: 0, hp: 0,
+      maxHp: GEN_MAX_HP, isSelf: true,
+      selfRank: 1,
     });
   }
   items.sort((a, b) => (a.y - b.y) || (a.selfRank - b.selfRank) || (a.id - b.id));
-  return items.map(({ x, y, kind, color }) => ({ x, y, kind, color }));
+  return items.map(({ selfRank: _selfRank, ...item }) => item);
 }
 
 // ---- maze cache ----
@@ -134,37 +207,12 @@ export type CacheImage = CanvasImageSource;
 
 export type RasterizeFn = (maze: MazeView, palette: Palette) => CacheImage;
 
-// makeCanvas builds an offscreen draw target, preferring OffscreenCanvas
-// with a detached <canvas> fallback (§6.5 / §17).
-function makeCanvas(w: number, h: number): {
-  surface: CacheImage;
-  ctx: CanvasRenderingContext2D;
-} {
-  if (typeof OffscreenCanvas !== "undefined") {
-    const oc = new OffscreenCanvas(w, h);
-    const ctx = oc.getContext("2d") as unknown as CanvasRenderingContext2D;
-    return { surface: oc as unknown as CacheImage, ctx };
-  }
-  const c = document.createElement("canvas");
-  c.width = w;
-  c.height = h;
-  return { surface: c, ctx: c.getContext("2d")! };
-}
-
-export const defaultRasterize: RasterizeFn = (maze, palette) => {
-  const { surface, ctx } = makeCanvas(maze.W * TILE_PX, maze.H * TILE_PX);
-  ctx.fillStyle = palette.bg;
-  ctx.fillRect(0, 0, maze.W * TILE_PX, maze.H * TILE_PX);
-  for (let ty = 0; ty < maze.H; ty++) {
-    for (let tx = 0; tx < maze.W; tx++) {
-      const t = maze.at(tx, ty);
-      if (t === TileCode.Wall) ctx.fillStyle = palette.wall;
-      else ctx.fillStyle = (tx + ty) % 2 === 0 ? palette.floor : palette.floorAlt;
-      ctx.fillRect(tx * TILE_PX, ty * TILE_PX, TILE_PX, TILE_PX);
-    }
-  }
-  return surface;
-};
+// defaultRasterize bakes the neon maze (spec §6). Thin wrapper delegating to
+// bakeNeonMaze in the NON-covered spriteAtlas module so the heavy impure
+// canvas baking stays off the per-file coverage gate (spec §4b). Still a pure
+// function of (maze, palette) — built once per setMap/setPalette, never in
+// draw() (the maze-cache-reuse invariant test asserts this).
+export const defaultRasterize: RasterizeFn = (maze, palette) => bakeNeonMaze(maze, palette, TILE_PX);
 
 // RenderCtx is the structural subset of CanvasRenderingContext2D the
 // Renderer uses; lets tests inject a recording fake.
@@ -191,17 +239,55 @@ export interface RenderCtx {
   restore(): void;
 }
 
+// blitSizeForKind sizes the on-screen sprite (the square dest the atlas cell is
+// scaled to). Mirrors the old circle footprints (radiusForKind) so the visual
+// scale is preserved: player/generator ≈ 2 tiles, snipe ≈ 1.4, projectile small.
+function blitSizeForKind(kind: number): number {
+  switch (kind) {
+    case 2: return TILE_PX * 2.0; // generator
+    case 3: return TILE_PX * 0.9; // projectile
+    case 4: return TILE_PX * 1.6; // snipe
+    default: return TILE_PX * 2.0; // player / self
+  }
+}
+
+const OVERLAY_BLIT_PX = TILE_PX * 1.8;
+
 export class Renderer {
   private ctx: RenderCtx;
   private palette: Palette;
   private rasterize: RasterizeFn;
   private maze: MazeView | null = null;
   private cache: CacheImage | null = null;
+  // Baked Direction-D surfaces (spec §5e): built ONCE in the constructor and on
+  // setPalette, never in draw(). The CRT overlay is also rebuilt when the
+  // canvas size changes (it is canvas-sized).
+  private atlas: SpriteAtlas;
+  private crt: CrtOverlay;
+  private crtW = 0;
+  private crtH = 0;
+  private retroFx: boolean;
+  // genMaxHp: per-generator observed maximum hp (its spawn HP). A generator
+  // first appears at full health, so the running max recovers the true max
+  // (3 base / 5 brutal) without any wire data, and never decreases as the
+  // hive takes damage. Pure over the deterministic snapshot stream.
+  // AIDEV-NOTE: seeded/read in draw() via maxHpFor(); never wall-clock driven.
+  private genMaxHp = new Map<number, number>();
 
-  constructor(ctx: RenderCtx, palette: Palette, rasterize: RasterizeFn = defaultRasterize) {
+  constructor(
+    ctx: RenderCtx,
+    palette: Palette,
+    rasterize: RasterizeFn = defaultRasterize,
+    opts?: { retroFx?: boolean },
+  ) {
     this.ctx = ctx;
     this.palette = palette;
     this.rasterize = rasterize;
+    this.retroFx = opts?.retroFx ?? true;
+    this.atlas = buildSpriteAtlas(palette);
+    this.crtW = ctx.canvas.width;
+    this.crtH = ctx.canvas.height;
+    this.crt = buildCrtOverlay(this.crtW, this.crtH, palette.scanlineAlpha, palette.vignetteAlpha);
   }
 
   // setMap rebuilds the maze cache. Called once per MapInit (or on a
@@ -214,6 +300,27 @@ export class Renderer {
   setPalette(palette: Palette): void {
     this.palette = palette;
     if (this.maze) this.cache = this.rasterize(this.maze, this.palette);
+    // Rebuild the baked atlas + CRT (hues / bloom / scanline alpha changed).
+    this.atlas = buildSpriteAtlas(palette);
+    this.crt = buildCrtOverlay(this.crtW, this.crtH, palette.scanlineAlpha, palette.vignetteAlpha);
+  }
+
+  // setRetroFx toggles the CRT scanline+vignette pass live (spec §5e).
+  setRetroFx(on: boolean): void {
+    this.retroFx = on;
+  }
+
+  // maxHpFor returns the highest hp this generator id has been observed at —
+  // its spawn HP, which equals its max HP. Seeded on first sight and only ever
+  // raised, so a damaged generator keeps its true denominator. Used as the
+  // damageStage denominator so brutal (spawn hp 5) hives crack at the correct
+  // HP fraction instead of against a fixed 3. Defaults to GEN_MAX_HP if unseen.
+  private maxHpFor(id: number, hp: number): number {
+    const prev = this.genMaxHp.get(id) ?? GEN_MAX_HP;
+    const m = hp > prev ? hp : prev;
+    if (m !== prev) this.genMaxHp.set(id, m);
+    else if (!this.genMaxHp.has(id)) this.genMaxHp.set(id, m);
+    return m;
   }
 
   // camera computes the current camera from the self position. Exposed
@@ -228,6 +335,16 @@ export class Renderer {
   draw(s: RenderState, _hud: HudModel): void {
     const ctx = this.ctx;
     const cam = this.camera(s);
+
+    // The CRT overlay is canvas-sized: rebuild it (NOT the atlas/maze) if the
+    // canvas was resized since the last bake. Still never per-frame in the
+    // steady state — only on an actual size change.
+    if (cam.w !== this.crtW || cam.h !== this.crtH) {
+      this.crtW = cam.w;
+      this.crtH = cam.h;
+      this.crt = buildCrtOverlay(this.crtW, this.crtH, this.palette.scanlineAlpha, this.palette.vignetteAlpha);
+    }
+
     ctx.fillStyle = this.palette.bg;
     ctx.fillRect(0, 0, cam.w, cam.h);
 
@@ -240,21 +357,71 @@ export class Renderer {
 
     // Draw all entities (self included) in one ascending-y order so the
     // local player is correctly occluded by / occludes others by depth.
-    for (const item of buildDrawList(s, this.palette)) {
-      this.drawEntity(cam, item.x, item.y, item.kind, item.color);
+    // maxHpFor resolves each generator's observed spawn HP as the damageStage
+    // denominator (so brutal hp-5 hives track true HP fraction).
+    for (const item of buildDrawList(s, this.palette, (id, hp) => this.maxHpFor(id, hp))) {
+      this.drawEntity(cam, item, s.selfId, s.renderTick);
+    }
+
+    // Combat overlays (muzzle / poof) blit on top of the entities.
+    if (s.overlays) {
+      for (const ov of s.overlays) this.drawOverlay(cam, ov);
+    }
+
+    // CRT scanline + vignette pass over the whole canvas (spec §5e).
+    if (this.retroFx) {
+      ctx.drawImage(this.crt.image, 0, 0, cam.w, cam.h, 0, 0, cam.w, cam.h);
     }
   }
 
-  private drawEntity(cam: Camera, wx: number, wy: number, kind: number, color: string): void {
-    const [px, py] = worldToScreen(cam, wx, wy);
+  // drawEntity blits the atlas cell for `item` (spec §5e). The cell is chosen
+  // per kind from the per-entity data carried on the DrawItem: hue (id), walk
+  // (vx/vy moving), facing (L/R), generator damage (hp) + pulse (renderTick).
+  // The local player also gets a glowing ground-ring blitted under it.
+  private drawEntity(cam: Camera, item: DrawItem, selfId: number, renderTick: number): void {
+    const [px, py] = worldToScreen(cam, item.x, item.y);
     const ctx = this.ctx;
-    ctx.fillStyle = color;
-    ctx.strokeStyle = this.palette.bg;
-    ctx.lineWidth = this.palette.outlineWidth;
-    ctx.beginPath();
-    ctx.arc(px, py, radiusForKind(kind), 0, Math.PI * 2);
-    ctx.closePath();
-    ctx.fill();
-    ctx.stroke();
+    const atlas = this.atlas;
+    const moving = item.vx !== 0 || item.vy !== 0;
+    const left = faceLeft(item.facing);
+
+    // Self ground-ring first (under the marine).
+    if (item.isSelf) {
+      this.blitCell(atlas.selfRing(), px, py, blitSizeForKind(1));
+    }
+
+    let cell;
+    switch (item.kind) {
+      case 1: // player / self
+        cell = atlas.player(hueIndexForId(item.id, selfId), walkFrame(item.id, renderTick, moving), left);
+        break;
+      case 2: // generator
+        cell = atlas.generator(damageStage(item.hp, item.maxHp), genPulseFrame(renderTick));
+        break;
+      case 3: // projectile
+        cell = atlas.projectile();
+        break;
+      case 4: // snipe
+        cell = atlas.snipe(item.id % SNIPE_VARIANTS, walkFrame(item.id, renderTick, moving), left);
+        break;
+      default:
+        cell = atlas.player(hueIndexForId(item.id, selfId), walkFrame(item.id, renderTick, moving), left);
+    }
+    this.blitCell(cell, px, py, blitSizeForKind(item.kind));
+  }
+
+  private drawOverlay(cam: Camera, ov: ResolvedOverlay): void {
+    const [px, py] = worldToScreen(cam, ov.x, ov.y);
+    const cell = ov.kind === "muzzle" ? this.atlas.muzzle(ov.frame) : this.atlas.poof(ov.frame);
+    this.blitCell(cell, px, py, OVERLAY_BLIT_PX);
+  }
+
+  // blitCell draws an atlas cell centered at (px,py), scaled to `size` px.
+  private blitCell(cell: { sx: number; sy: number; sw: number; sh: number }, px: number, py: number, size: number): void {
+    this.ctx.drawImage(
+      this.atlas.image,
+      cell.sx, cell.sy, cell.sw, cell.sh,
+      px - size / 2, py - size / 2, size, size,
+    );
   }
 }

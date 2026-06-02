@@ -11,6 +11,12 @@ export const WALK_FRAME_TICKS = 4; // render ticks per walk frame
 export const MUZZLE_FLASH_TICKS = 6;
 export const DEATH_POOF_TICKS = 18;
 
+// docs/superpowers/specs/2026-06-02-enhanced-graphics-design.md §5b —
+// generator core-glow pulse cadence. The atlas bakes 4 pulse cells; the
+// renderer advances one cell every GEN_PULSE_TICKS render ticks so the
+// hive "breathes" deterministically (no wall-clock — golden requirement).
+export const GEN_PULSE_TICKS = 8;
+
 export type WalkFrame = 0 | 1 | 2 | 3;
 export type Dir8Index = 0 | 1 | 2 | 3 | 4 | 5 | 6 | 7;
 
@@ -37,6 +43,58 @@ export function dir8FromFacing(facing: number): Dir8Index {
     case 8: return 7; // NW
     default: return 4; // Idle → S
   }
+}
+
+// --- Direction D enhanced-graphics helpers (spec §5b) ---
+// All are pure functions of (renderTick | static entity state) so a frozen
+// renderTick yields identical sprite-cell selections (golden-frame, §4/§7).
+
+// genPulseFrame: which of the 4 baked generator pulse cells to blit at this
+// renderTick. floor(tick / GEN_PULSE_TICKS) mod 4. Negative ticks are not
+// expected (renderTick is monotonic from 0), but we keep the modulo
+// non-negative for safety/purity.
+export function genPulseFrame(renderTick: number): 0 | 1 | 2 | 3 {
+  const base = Math.floor(renderTick / GEN_PULSE_TICKS);
+  return ((((base % 4) + 4) % 4) as 0 | 1 | 2 | 3);
+}
+
+// faceLeft: should the sprite be drawn mirrored? True for the west-ward
+// Dir8 headings — SW(6), W(7), NW(8). All other facings (incl. Idle) face
+// right (the un-mirrored bake). Mirrors dir8FromFacing's wire enum (sim.ts
+// Dir: 0=Idle,1=N..8=NW).
+export function faceLeft(facing: number): boolean {
+  return facing === 6 || facing === 7 || facing === 8;
+}
+
+// damageStage: maps current/max hp to a 3-stage sprite damage index:
+//   0 healthy   (hp ≥ ⅔ max)
+//   1 cracked   (⅓ ≤ hp < ⅔ max)
+//   2 critical  (hp < ⅓ max)
+// Guards a non-positive maxHp (treat as healthy). Clamps fractions outside
+// [0,1] so out-of-range hp never escapes the 0..2 range.
+export function damageStage(hp: number, maxHp: number): 0 | 1 | 2 {
+  if (maxHp <= 0) return 0;
+  const frac = hp / maxHp;
+  if (frac >= 2 / 3) return 0;
+  if (frac >= 1 / 3) return 1;
+  return 2;
+}
+
+// muzzleFrame: clamps an overlay age (renderTick - armedAtTick) to a valid
+// baked muzzle-flash cell index 0..MUZZLE_FLASH_TICKS-1. Frame == age while
+// armed; callers purge the overlay once it expires, but we clamp defensively.
+export function muzzleFrame(age: number): number {
+  if (age < 0) return 0;
+  if (age >= MUZZLE_FLASH_TICKS) return MUZZLE_FLASH_TICKS - 1;
+  return age | 0;
+}
+
+// poofFrame: clamps an overlay age to a valid baked death-poof cell index
+// 0..DEATH_POOF_TICKS-1 (see muzzleFrame).
+export function poofFrame(age: number): number {
+  if (age < 0) return 0;
+  if (age >= DEATH_POOF_TICKS) return DEATH_POOF_TICKS - 1;
+  return age | 0;
 }
 
 export type OverlayKind = "muzzle" | "poof";
