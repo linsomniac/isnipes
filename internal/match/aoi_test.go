@@ -90,15 +90,18 @@ func TestAOI_HysteresisProjectile(t *testing.T) {
 	prevEmpty := map[sim.EntityID]struct{}{}
 	prevWith := map[sim.EntityID]struct{}{42: {}}
 
-	d := chebyshevTiles(0, 0, 11*256, 0)
-	if d != 11 {
-		t.Fatalf("chebyshevTiles incorrectly = %d, want 11", d)
+	// Distances are expressed relative to the band constants so the test
+	// tracks MAZE_REVAMP rescaling instead of hardcoding pre-revamp values.
+	inBand := AOIInnerProj + 1 // outside the inner band, inside the hysteresis band
+	d := chebyshevTiles(0, 0, int32(inBand)*256, 0)
+	if d != inBand {
+		t.Fatalf("chebyshevTiles incorrectly = %d, want %d", d, inBand)
 	}
 
-	// 11 tiles > AOIInnerProj(10) → only included via hysteresis.
+	// d > AOIInnerProj → only included via hysteresis.
 	includedEmpty := d <= AOIInnerProj
 	if includedEmpty {
-		t.Fatal("11-tile entity included without hysteresis")
+		t.Fatal("entity beyond inner band included without hysteresis")
 	}
 	includedHyst := d <= AOIInnerProj
 	_, was := prevEmpty[42]
@@ -106,19 +109,20 @@ func TestAOI_HysteresisProjectile(t *testing.T) {
 		includedHyst = true
 	}
 	if includedHyst {
-		t.Fatal("11-tile entity included from empty prev")
+		t.Fatal("entity included from empty prev")
 	}
 	_, was = prevWith[42]
 	includedHyst = d <= AOIInnerProj || (was && d <= AOIHysteresisProj)
 	if !includedHyst {
-		t.Fatal("11-tile entity NOT included via hysteresis (prevWith)")
+		t.Fatal("entity NOT included via hysteresis (prevWith)")
 	}
 
-	// 13 tiles > AOIHysteresisProj(12) → excluded even with hysteresis.
-	d13 := chebyshevTiles(0, 0, 13*256, 0)
+	// One tile beyond the outer (hysteresis) band → excluded even with hysteresis.
+	beyondBand := AOIHysteresisProj + 1
+	d13 := chebyshevTiles(0, 0, int32(beyondBand)*256, 0)
 	includedHyst = d13 <= AOIInnerProj || (was && d13 <= AOIHysteresisProj)
 	if includedHyst {
-		t.Fatal("13-tile entity included from prevWith despite > outer band")
+		t.Fatal("entity beyond outer band included from prevWith despite > outer band")
 	}
 }
 

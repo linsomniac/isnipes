@@ -132,12 +132,13 @@ func runLoad(cfg Config, reg *observ.Registry) (Report, error) {
 	// an operator sees the trend live and we capture the peak goroutine
 	// count. (Full 24h soak is operator-run; the leak/RSS pass-fail uses the
 	// post-drain figures below.)
-	goroutineMax := before
+	goroutineMax := 0          // stays 0 on a non-soak run (matches Report doc + its sibling "0 otherwise" fields)
 	var goroutineSamples []int // sampler-goroutine only; read after join (no race)
 	var rssSamples []uint64    // ditto; drives the steady-state RSS leak trend
 	sampleStop := make(chan struct{})
 	var sampleDone sync.WaitGroup
 	if cfg.Soak {
+		goroutineMax = before // seed the peak with the pre-load baseline for soak runs
 		sampleDone.Add(1)
 		go func() {
 			defer sampleDone.Done()

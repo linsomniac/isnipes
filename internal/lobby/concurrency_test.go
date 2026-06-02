@@ -17,17 +17,28 @@ func TestLobby_200ConcurrentRoomsNoPanic(t *testing.T) {
 	defer func() { l.Stop(); <-done }()
 
 	const N = 200
+	// Connect each mock session with a LARGE outbound buffer. The lobby's
+	// send() is non-blocking and force-drops a session whose out channel is
+	// full (dropSession), which also frees its OPEN room. Under the create
+	// storm below — 200 creates each fanning a room_added delta to all 200
+	// sessions — the default cap-16 channel overflows whenever a reader
+	// goroutine is briefly starved, so a host gets dropped and ITS room
+	// vanishes: that is the real cause of the historical "got 199 rooms"
+	// flake (not slowness). A buffer wider than the worst-case burst
+	// (≈N deltas + a few resyncs) means no session is ever dropped, so all
+	// 200 rooms survive deterministically regardless of scheduling.
+	const sessBuf = 4096
 	sessions := make([]*Session, N)
 	outs := make([]chan Outbound, N)
 	for i := 0; i < N; i++ {
-		sessions[i], outs[i] = connect(t, l)
+		out := make(chan Outbound, sessBuf)
+		sessions[i] = l.Connect(out)
+		outs[i] = out
 		helloAndDrain(t, l, sessions[i], outs[i], fmt.Sprintf("U%d", i))
 	}
 
-	// Fire 200 createRooms in parallel AND start a session-out drainer
-	// per session so the actor's broadcastRoomDelta does not stall on
-	// any one session's full out channel. (lobby's send is non-blocking
-	// but if probes / readers later run, frames queue up.)
+	// Fire 200 createRooms in parallel AND keep draining each session so the
+	// buffers (already burst-sized) never approach full even under load.
 	stopDrain := make(chan struct{})
 	for i := 0; i < N; i++ {
 		go func(i int) {
@@ -55,20 +66,28 @@ func TestLobby_200ConcurrentRoomsNoPanic(t *testing.T) {
 	}
 	wg.Wait()
 
-	// The actor drains the inbox sequentially. Per createRoom the
-	// actor also broadcasts a room_added to every connected session
-	// — that's 200 × 200 = 40 000 send ops. Most session out channels
-	// (cap 16) fill and the lobby silently drops frames per its
-	// `default:` branch; the rooms themselves stay in l.rooms.
-	// We give it generous time then snapshot once via a probe.
-	deadline := time.Now().Add(15 * time.Second)
-	var rooms map[string]proto.RoomDescriptor
-	for time.Now().Before(deadline) {
-		rooms = snapshotRooms(t, l)
-		if len(rooms) >= N {
-			break
-		}
-		time.Sleep(100 * time.Millisecond)
+	// Read the room count DETERMINISTICALLY rather than polling on a wall clock.
+	// PostMessage is a synchronous enqueue, so after wg.Wait() all 200 createRoom
+	// messages are queued ahead of anything we send next. A fresh probe's Hello is
+	// therefore FIFO-ordered AFTER every create, so the RoomList the actor sends in
+	// reply is the full 200-room snapshot — no timing race, no poll loop. The probe
+	// gets a large buffer too so its reply is never dropped.
+	probeOut := make(chan Outbound, sessBuf)
+	probe := l.Connect(probeOut)
+	sendEnvelope(t, l, probe.ID, proto.LobbyHello, proto.Hello{
+		Nick: "CountProbe", SchemaChecksum: proto.SchemaChecksum(),
+	})
+	if _, ok := drainUntil(t, probeOut, proto.LobbyWelcome, 30*time.Second); !ok {
+		t.Fatal("probe never received Welcome")
+	}
+	o, ok := drainUntil(t, probeOut, proto.LobbyRoomList, 30*time.Second)
+	if !ok {
+		t.Fatal("probe never received RoomList snapshot")
+	}
+	rl := o.Payload.(proto.RoomList)
+	rooms := make(map[string]proto.RoomDescriptor, len(rl.Rooms))
+	for _, r := range rl.Rooms {
+		rooms[r.ID] = r
 	}
 	if len(rooms) != N {
 		t.Fatalf("got %d rooms, want %d", len(rooms), N)

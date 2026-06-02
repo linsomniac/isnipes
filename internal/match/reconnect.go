@@ -26,15 +26,19 @@ func (m *Match) handleDC(v ctlDC) {
 	if m.sim != nil {
 		slot.DCDeadlineTick = m.sim.ServerTick() + graceTicks
 		m.sim.FreezePlayer(v.PlayerID)
-	}
-	// Find the slot's original join token so the reconnect path can
-	// validate the same token. The token is the bySession key (if it
-	// survived the join-consume) OR pulled from cfg.PlayerSlots.
-	tok := m.tokenForPlayer(v.PlayerID)
-	if tok != "" {
-		m.dcTokensMu.Lock()
-		m.dcTokens[tok] = v.PlayerID
-		m.dcTokensMu.Unlock()
+		// Register the reconnect token only once there is a live entity to
+		// reconnect to. The token is the bySession key (if it survived the
+		// join-consume) OR pulled from cfg.PlayerSlots. A warmup DC
+		// (m.sim==nil) defers both the deadline and the token to
+		// startOrAbort, which arms them from the first live tick —
+		// otherwise handleReconnect would nil-deref m.sim, and an un-armed
+		// DCDeadlineTick==0 would drop the slot on the very first tick.
+		tok := m.tokenForPlayer(v.PlayerID)
+		if tok != "" {
+			m.dcTokensMu.Lock()
+			m.dcTokens[tok] = v.PlayerID
+			m.dcTokensMu.Unlock()
+		}
 	}
 	// Close the writer side of the dropped connection. The slot keeps
 	// Joined=true so DC-grace counts; subsequent sends skip it via
@@ -72,6 +76,14 @@ func (m *Match) handleReconnect(v ctlReconnect) {
 		return
 	}
 	if m.sim != nil && m.sim.ServerTick() >= slot.DCDeadlineTick {
+		v.Reply <- joinResult{Err: ErrAuth}
+		return
+	}
+	// Defensive: the resync sequence below dereferences m.sim. A warmup DC
+	// registers no token (handleDC), so a token mapping to a slot while
+	// m.sim==nil should not exist — but bail to ErrAuth rather than risk a
+	// nil-deref → SERVER_ERROR abort if one ever does.
+	if m.sim == nil {
 		v.Reply <- joinResult{Err: ErrAuth}
 		return
 	}
@@ -120,6 +132,7 @@ func (m *Match) dropDCSlot(pid sim.EntityID, slot *Slot) {
 	slot.closeOnce.Do(func() { close(slot.closed) })
 	m.markUnjoined(slot) // release the gauge if still joined
 	delete(m.slots, pid)
+	delete(m.aoiPrev, pid) // drop the slot's hysteresis state with it
 }
 
 // tokenForPlayer recovers the original joinToken for a slot. After

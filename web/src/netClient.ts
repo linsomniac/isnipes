@@ -147,6 +147,11 @@ export class NetClient {
   }
 
   private sendPing(): void {
+    // The ping ticker is armed before onopen, so it can fire while the
+    // socket is still CONNECTING — WebSocket.send() throws InvalidStateError
+    // then. Guard on readyState (1 === OPEN; the test stub may not expose
+    // the WebSocket.OPEN constant), matching the input/chat send guards.
+    if (this.ws.readyState !== 1) return;
     const now = this.clock.nowMs();
     // Client-originated Ping with ts_origin in client clock.
     const payload = new Uint8Array(4);

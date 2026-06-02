@@ -159,22 +159,3 @@ func (r *Registry) StopAll(ctx context.Context) error {
 	}
 	return nil
 }
-
-// Close shuts down the registry. It does not signal individual
-// matches to stop (that would require a richer control protocol);
-// it just waits up to ctx.Done() for them to drain via natural
-// MatchOver. Phase 2 keeps this best-effort.
-func (r *Registry) Close(ctx context.Context) error {
-	r.mu.Lock()
-	count := len(r.matches)
-	r.mu.Unlock()
-	if count == 0 {
-		return nil
-	}
-	select {
-	case <-ctx.Done():
-		return ctx.Err()
-	default:
-	}
-	return nil
-}

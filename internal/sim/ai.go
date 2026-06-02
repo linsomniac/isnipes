@@ -195,16 +195,19 @@ func (s *Sim) aiStepAttack(snipe *Entity, ss *snipeState, lp LevelParams) []Even
 		return nil
 	}
 
+	// Reserve the slab slot first (alloc() is side-effect-free), so a full
+	// slab does not burn a monotonic EntityID or arm the cooldown for a
+	// projectile that is never created.
+	pIdx := s.store.alloc()
+	if pIdx < 0 {
+		return nil
+	}
 	pid, ok := s.store.allocID()
 	if !ok {
 		s.quiesced = true
 		return nil
 	}
 	ss.fireCooldown = lp.SnipeFireCooldown
-	pIdx := s.store.alloc()
-	if pIdx < 0 {
-		return nil
-	}
 	vx, vy := velocityFor(fireDir, projectileSpeed)
 	s.store.slots[pIdx] = Entity{
 		ID:     pid,

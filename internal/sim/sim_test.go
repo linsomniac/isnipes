@@ -289,9 +289,7 @@ func phase5TickInputs(s *Sim, i int) []PlayerInput {
 		dist := absInt(tx-rx) + absInt(ty-ry)
 		var dir, fire Dir
 		if dist > 1 {
-			if nx, ny, ok := PathNext(s.maze, tx, ty, rx, ry, 4096); ok {
-				dir = steerAlongPath(e.X, e.Y, tx, ty, nx, ny)
-			}
+			dir = steerWide(s.maze, e.X, e.Y, rx, ry)
 		}
 		if id == 4 {
 			out = append(out, PlayerInput{PlayerID: id, Dir: dir, ClientTick: uint16(i)})
@@ -307,7 +305,8 @@ func phase5TickInputs(s *Sim, i int) []PlayerInput {
 	return out
 }
 
-// phase5Rendezvous returns the walkable tile nearest the map centre.
+// phase5Rendezvous returns the wide-walkable tile nearest the map centre (so
+// the converging 2-tile players can actually stand on it together and fire).
 func phase5Rendezvous(s *Sim) (int, int) {
 	cx, cy := s.Width()/2, s.Height()/2
 	for r := 0; r < s.Width()+s.Height(); r++ {
@@ -317,7 +316,7 @@ func phase5Rendezvous(s *Sim) (int, int) {
 				if x <= 0 || y <= 0 || x >= s.Width()-1 || y >= s.Height()-1 {
 					continue
 				}
-				if s.maze.at(x, y) != TileWall {
+				if wideWalkable(s.maze, x, y) {
 					return x, y
 				}
 			}
@@ -326,13 +325,25 @@ func phase5Rendezvous(s *Sim) (int, int) {
 	return cx, cy
 }
 
-// steerAlongPath converts a BFS next-tile into a CARDINAL movement Dir toward
-// that tile's centre (dominant axis first). MAZE_REVAMP.md widened corridors to
-// corridorWidth tiles but left 1-tile wall pillars at 4-cell junctions;
-// cardinal-only motion keeps the 2-tile player off those pillars (diagonal
-// motion clips them and stalls). The current tile (tx, ty) is unused now.
-func steerAlongPath(x, y int32, tx, ty, nx, ny int) Dir {
-	_, _ = tx, ty
+// steerWide walks the 2-tile-wide player from its sub-tile position toward goal
+// tile (gx,gy) and returns the cardinal movement Dir. A naive BFS-POINT
+// follower wedges the wide body against junction walls at the post-MAZE_REVAMP
+// + 3.5×-speed scale (git 40ee100): the point path says "go East", but the
+// wide player is already flush against a perpendicular wall and can neither
+// advance nor turn, so it freezes. steerWide instead routes over the
+// WIDE-WALKABLE graph (widePathNext) — every step admits the centred 2-tile
+// body, so the path turns away from a wall a full tile early and never wedges.
+func steerWide(m *maze, x, y int32, gx, gy int) Dir {
+	cx, cy := int(x)/subtilePerTile, int(y)/subtilePerTile
+	if cx == gx && cy == gy {
+		return DirIdle
+	}
+	nx, ny, ok := widePathNext(m, cx, cy, gx, gy, 4096)
+	if !ok {
+		return DirIdle
+	}
+	// Steer toward the next wide-walkable tile's centre, dominant axis first;
+	// this also re-centres the body in the corridor as it advances.
 	dx := int32(nx*subtilePerTile+subtilePerTile/2) - x
 	dy := int32(ny*subtilePerTile+subtilePerTile/2) - y
 	adx, ady := dx, dy
@@ -357,6 +368,81 @@ func steerAlongPath(x, y int32, tx, ty, nx, ny int) Dir {
 		return DirN
 	}
 	return DirIdle
+}
+
+// wideWalkable reports whether the centred 2-tile player fits on tile (cx,cy)
+// without overlapping a wall. A centred 512-wide body laps 128 subtiles into
+// each neighbouring tile, so the whole 3×3 ring must be open — in practice the
+// centreline of a 3-wide MAZE_REVAMP corridor.
+func wideWalkable(m *maze, cx, cy int) bool {
+	for dy := -1; dy <= 1; dy++ {
+		for dx := -1; dx <= 1; dx++ {
+			if m.at(cx+dx, cy+dy) == TileWall {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+// widePathNext is PathNext over the wide-walkable graph: every tile past the
+// start must admit the centred 2-tile body, so the returned step never drives
+// the wide player into a junction wall. The goal must itself be wide-walkable.
+func widePathNext(m *maze, sx, sy, gx, gy, maxDepth int) (int, int, bool) {
+	if sx == gx && sy == gy {
+		return sx, sy, true
+	}
+	W, H := m.W, m.H
+	if sx < 0 || sx >= W || sy < 0 || sy >= H || gx < 0 || gx >= W || gy < 0 || gy >= H {
+		return 0, 0, false
+	}
+	dirs := [4]struct {
+		dx, dy int
+		first  pathDir
+	}{{0, -1, pathDirN}, {1, 0, pathDirE}, {0, 1, pathDirS}, {-1, 0, pathDirW}}
+	visited := make([]pathDir, W*H)
+	visited[sy*W+sx] = pathDirNone + 1
+	type fe struct {
+		x, y, depth int
+		first       pathDir
+	}
+	queue := make([]fe, 0, 256)
+	enqueue := func(px, py, depth int, first pathDir) (int, int, bool, bool) {
+		for _, d := range dirs {
+			nx, ny := px+d.dx, py+d.dy
+			if nx < 0 || nx >= W || ny < 0 || ny >= H {
+				continue
+			}
+			if visited[ny*W+nx] != pathDirNone || !wideWalkable(m, nx, ny) {
+				continue
+			}
+			step := first
+			if depth == 0 {
+				step = d.first
+			}
+			visited[ny*W+nx] = step
+			if nx == gx && ny == gy {
+				rx, ry, ok := firstStepCoords(sx, sy, step)
+				return rx, ry, ok, true
+			}
+			queue = append(queue, fe{nx, ny, depth + 1, step})
+		}
+		return 0, 0, false, false
+	}
+	if rx, ry, ok, done := enqueue(sx, sy, 0, pathDirNone); done {
+		return rx, ry, ok
+	}
+	for len(queue) > 0 {
+		f := queue[0]
+		queue = queue[1:]
+		if f.depth >= maxDepth {
+			continue
+		}
+		if rx, ry, ok, done := enqueue(f.x, f.y, f.depth, f.first); done {
+			return rx, ry, ok
+		}
+	}
+	return 0, 0, false
 }
 
 func absInt(x int) int {

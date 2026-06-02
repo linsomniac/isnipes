@@ -113,7 +113,14 @@ func runClient(ctx context.Context, wsURL, token string, inputHz int, stats *cli
 		}
 	}()
 
-	ticker := time.NewTicker(time.Second / time.Duration(inputHz))
+	// inputHz is already guarded > 0 by Config.withDefaults, but an absurd
+	// value (> 1e9) makes the integer division floor to 0, which would
+	// panic time.NewTicker. Clamp the interval to a sane minimum.
+	interval := time.Second / time.Duration(inputHz)
+	if interval <= 0 {
+		interval = time.Nanosecond
+	}
+	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 	var ct uint16
 	for {
@@ -153,7 +160,7 @@ func encodeMatchJoin(token string) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	return proto.EncodeFrame(nil, proto.FrameHeader{Type: proto.MsgMatchJoin, Ack: proto.AckNone, Len: uint16(len(payload))}, payload)
+	return proto.EncodeFrame(nil, proto.FrameHeader{Type: proto.MsgMatchJoin, Ack: proto.AckNone}, payload)
 }
 
 func encodeInput(in proto.Input) ([]byte, error) {
@@ -161,7 +168,7 @@ func encodeInput(in proto.Input) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	return proto.EncodeFrame(nil, proto.FrameHeader{Type: proto.MsgInput, Ack: proto.AckNone, Len: uint16(len(payload))}, payload)
+	return proto.EncodeFrame(nil, proto.FrameHeader{Type: proto.MsgInput, Ack: proto.AckNone}, payload)
 }
 
 func writeFrame(ctx context.Context, c *websocket.Conn, frame []byte) error {

@@ -5,18 +5,18 @@
   "entries": [
     {
       "player_id": 1,
-      "score": 225,
-      "lives_remaining": 9
-    },
-    {
-      "player_id": 2,
-      "score": 85,
+      "score": 335,
       "lives_remaining": 1
     },
     {
+      "player_id": 2,
+      "score": 240,
+      "lives_remaining": 2
+    },
+    {
       "player_id": 3,
-      "score": 135,
-      "lives_remaining": 6
+      "score": 130,
+      "lives_remaining": 0
     },
     {
       "player_id": 4,

@@ -19,9 +19,9 @@ import (
 
 // ServerConfig governs the Server.
 type ServerConfig struct {
-	Lobby            *lobby.Lobby
-	MatchRegistry    *match.Registry
-	StaticFS         fs.FS
+	Lobby             *lobby.Lobby
+	MatchRegistry     *match.Registry
+	StaticFS          fs.FS
 	HandshakeTimeout  time.Duration // default 5s
 	IdleTimeout       time.Duration // default 5s
 	PingInterval      time.Duration // Phase 4 §4.3.3: default 500ms (match keepalive)
@@ -139,6 +139,15 @@ func (s *Server) handleLobby(w http.ResponseWriter, r *http.Request) {
 	}
 	out := make(chan lobby.Outbound, 64)
 	sess := s.cfg.Lobby.Connect(out)
+	if sess == nil {
+		// The lobby actor stopped mid-handshake — a graceful shutdown races
+		// a freshly-accepted WS that http.Server.Shutdown can't close because
+		// it is hijacked. Connect returns nil and has already closed `out`,
+		// so do NOT close it again (double-close panics). Without this guard
+		// the reader loop nil-derefs sess.ID.
+		_ = c.Close(websocket.StatusGoingAway, "shutting down")
+		return
+	}
 	ctx, cancel := context.WithCancel(r.Context())
 	defer cancel()
 
@@ -284,7 +293,7 @@ func (s *Server) handleMatch(w http.ResponseWriter, r *http.Request) {
 		ticker := time.NewTicker(s.cfg.PingInterval)
 		defer ticker.Stop()
 		writeFrame := func(t proto.MsgType, payload []byte) bool {
-			hdr := proto.FrameHeader{Type: t, Seq: seq, Ack: proto.AckNone, Len: uint16(len(payload))}
+			hdr := proto.FrameHeader{Type: t, Seq: seq, Ack: proto.AckNone}
 			seq++
 			buf, err := proto.EncodeFrame(nil, hdr, payload)
 			if err != nil {
@@ -359,18 +368,18 @@ func (s *Server) handleMatch(w http.ResponseWriter, r *http.Request) {
 			}
 			m.SubmitInput(pid, inp)
 		case proto.MsgPing:
-			// Echo as Pong (client-initiated ping per §4.3.3).
+			// Client-initiated ping (§4.3.3): route the Pong through the
+			// match actor so `out` keeps a single producer. A direct send
+			// here raced the actor's close(out) on teardown — select-with-
+			// default does NOT make a send on a closed channel safe (it
+			// panics with "send on closed channel").
 			p, err := proto.DecodePing(payload)
 			if err != nil {
 				_ = closeWith(c, CloseMalformed)
+				m.SubmitDC(pid) // match every other fatal post-join path
 				return
 			}
-			pong := proto.Pong{TsOrigin: p.TsOrigin, TsResponder: uint32(time.Now().UnixMilli())}
-			b, _ := pong.Encode(nil)
-			select {
-			case out <- match.OutboundFrame{Type: proto.MsgPong, Payload: b}:
-			default:
-			}
+			m.SubmitClientPing(pid, p.TsOrigin)
 		case proto.MsgPong:
 			// Phase 4 §7.2: Pong reply to a server-issued Ping.
 			// Compute RTT = now - ts_origin (server clock domain).

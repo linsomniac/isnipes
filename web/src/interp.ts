@@ -40,11 +40,13 @@ export class InterpBuffer {
   }
 
   // push records a snapshot received at wall-clock `recvWallMs` for
-  // server tick `serverTick`. The buffer is kept in ascending tick
-  // order. Stale entries are pruned.
+  // server tick `serverTick`. The buffer is kept in ascending receive
+  // wall-time (wallMs) order — sample()/pruneStale key off wallMs, not
+  // serverTick (which is retained only as informational metadata). Stale
+  // entries are pruned.
   push(serverTick: number, recvWallMs: number, entities: EntityState[]): void {
     this.buf.push({ serverTick, wallMs: recvWallMs, entities });
-    // Keep tick-ascending.
+    // Keep wall-time ascending.
     this.buf.sort((a, b) => a.wallMs - b.wallMs);
     this.pruneStale(recvWallMs);
   }

@@ -53,8 +53,13 @@ func HasLOS(m *maze, sx, sy, tx, ty, maxRange int) bool {
 	// accumulated error is smaller. The accumulators are tDeltaX = ay
 	// and tDeltaY = ax (the perpendicular axis's step "rate").
 	x, y := sx, sy
-	tMaxX := ax
-	tMaxY := ay
+	// Seed each accumulator with its own per-cell step rate (tDeltaX = ay,
+	// tDeltaY = ax — see comment above), NOT the other axis's. Seeding
+	// tMaxX with ax (and tMaxY with ay) over-steps the minor axis and the
+	// walk runs off-grid, so HasLOS returned false for any clear line whose
+	// slope is neither axis-aligned nor 1:1.
+	tMaxX := ay
+	tMaxY := ax
 	for !(x == tx && y == ty) {
 		if tMaxX < tMaxY {
 			x += stepX

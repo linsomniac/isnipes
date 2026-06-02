@@ -401,7 +401,17 @@ func (l *Lobby) handleCreateRoom(s *Session, c proto.CreateRoom) {
 		l.sendError(s, proto.LobbyErrBadLevel, "level must be A-Z × 1-9")
 		return
 	}
+	// Regenerate on the (astronomically unlikely) collision so a new room
+	// never silently overwrites a live one and orphans its members. The
+	// lobby actor is single-threaded, so there is no TOCTOU here. Mirrors
+	// the match registry's duplicate-ID guard.
 	id := newRoomID()
+	for i := 0; i < 8; i++ {
+		if _, exists := l.rooms[id]; !exists {
+			break
+		}
+		id = newRoomID()
+	}
 	room := &Room{
 		ID:      id,
 		Name:    strings.TrimSpace(c.Name),
@@ -542,6 +552,14 @@ func (l *Lobby) handleStartMatch(s *Session, sm proto.StartMatch) {
 		tok, err := generateToken()
 		if err != nil {
 			l.sendError(s, proto.LobbyErrBadRequest, "token gen: "+err.Error())
+			// Mirror the Registry.Create failure path: roll the room back
+			// to OPEN and drop the tokens already issued this start, so a
+			// transient token-gen failure does not leave the room wedged in
+			// STARTING with leaked tokens.
+			room.State = RoomOpen
+			for _, p := range pending {
+				delete(l.tokens, p.Token)
+			}
 			return
 		}
 		nick := ""

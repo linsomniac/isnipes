@@ -530,14 +530,21 @@ func (s *Sim) Tick(inputs []PlayerInput) ([]Event, error) {
 		if liveProj >= maxInFlightProjectiles {
 			continue
 		}
-		// Allocate projectile.
+		// Allocate projectile. Reserve the slab slot first (alloc() is
+		// side-effect-free): a full slab must skip this shooter for the
+		// tick — not index slots[-1] and panic, nor burn an EntityID/arm
+		// the cooldown. The maxInFlightProjectiles cap above usually
+		// prevents a full slab, but other entity kinds can fill it.
+		pIdx := s.store.alloc()
+		if pIdx < 0 {
+			continue
+		}
 		pid, ok := s.store.allocID()
 		if !ok {
 			s.quiesced = true
 			return nil, ErrIDExhausted
 		}
 		ps.fireCooldown = fireCooldownTicks
-		pIdx := s.store.alloc()
 		vx, vy := velocityFor(inp.FireDir, projectileSpeed)
 		s.store.slots[pIdx] = Entity{
 			ID:     pid,

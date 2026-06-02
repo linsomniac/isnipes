@@ -151,6 +151,15 @@ type ctlPong struct {
 	RTTMs    uint32
 }
 
+// ctlClientPing carries a client-initiated Ping (§4.3.3) so the actor —
+// the sole producer/closer of slot.out — emits the Pong reply. The net
+// reader must NOT write the Pong onto out directly; that second producer
+// races the actor's close(out) on teardown (send-on-closed panic).
+type ctlClientPing struct {
+	PlayerID sim.EntityID
+	TsOrigin uint32
+}
+
 type ctlClose struct {
 	PlayerID sim.EntityID
 	Reason   uint8 // §6.4: 0 clean, 1 timeout
@@ -180,6 +189,7 @@ type ctlShutdown struct{}
 func (ctlJoin) controlTag()        {}
 func (ctlInput) controlTag()       {}
 func (ctlPong) controlTag()        {}
+func (ctlClientPing) controlTag()  {}
 func (ctlClose) controlTag()       {}
 func (ctlAbort) controlTag()       {}
 func (ctlDC) controlTag()          {}
@@ -193,13 +203,21 @@ type Match struct {
 	in               chan controlMsg
 	stateAtomic      atomic.Uint32 // holds MatchState; updated by Run goroutine, read by anyone
 	serverTickAtomic atomic.Uint32 // mirrors sim.ServerTick() for race-free external reads
-	sim              *sim.Sim
-	slots            map[sim.EntityID]*Slot
-	bySession        map[string]sim.EntityID // token → playerID
-	startedAt        time.Time
-	endedAt          time.Time
-	clock            func() time.Time
-	ticker           Ticker
+
+	// joinedCountAtomic mirrors the number of currently-joined slots. The
+	// actor goroutine is the sole writer (incremented on join, decremented in
+	// markUnjoined — both run only on the actor), so external callers can read
+	// the count race-free via JoinedCount() WITHOUT iterating m.slots (which
+	// the actor concurrently delete()s from — a fatal concurrent map
+	// iteration/write).
+	joinedCountAtomic atomic.Int64
+	sim               *sim.Sim
+	slots             map[sim.EntityID]*Slot
+	bySession         map[string]sim.EntityID // token → playerID
+	startedAt         time.Time
+	endedAt           time.Time
+	clock             func() time.Time
+	ticker            Ticker
 
 	// Phase 8 §6.4/§6.5 — nil-safe tick instrumentation + over-budget
 	// snapshot suppression. overBudget is set when a tick runs long and
@@ -244,7 +262,8 @@ type Match struct {
 
 	// Phase 5 §11.3 — per-recipient hysteresis state. Each entry is
 	// the set of EntityIDs included in the recipient's previous tick
-	// snapshot. Cleared on dead-cam transition or reconnect.
+	// snapshot. Cleared on dead-cam transition (snapshot.go) and when a
+	// slot is dropped (dropDCSlot); a reconnect deliberately keeps it.
 	aoiPrev map[sim.EntityID]map[sim.EntityID]struct{}
 
 	// Phase 5 codex P5/iter6 — closed when Run returns. Used by
@@ -349,12 +368,35 @@ func (m *Match) ServerTick() uint32 {
 
 // SubmitJoin is the synchronous join helper used by tests and by the
 // net layer's reader goroutine. It blocks until the actor accepts or
-// rejects.
+// rejects, but never forever: both the send and the receive are guarded
+// on m.done so a ctlJoin that lands after a graceful shutdown (where the
+// Run defer skips the tail absorber and a full 256-buffer would otherwise
+// block the send) returns ErrAuth instead of leaking this goroutine.
+// Mirrors SubmitReconnect (codex P5/iter6 #2).
 func (m *Match) SubmitJoin(token string, out chan<- OutboundFrame) (sim.EntityID, error) {
+	if m.State() == StateEnded {
+		return 0, ErrAuth
+	}
 	reply := make(chan joinResult, 1)
-	m.in <- ctlJoin{Token: token, Out: out, Reply: reply}
-	r := <-reply
-	return r.PlayerID, r.Err
+	select {
+	case m.in <- ctlJoin{Token: token, Out: out, Reply: reply}:
+	case <-m.done:
+		return 0, ErrAuth
+	}
+	select {
+	case r := <-reply:
+		return r.PlayerID, r.Err
+	case <-m.done:
+		// Actor exited between our send and reply. Wait briefly for the
+		// absorber (non-graceful path) to ErrAuth us; on the graceful path
+		// no absorber runs, so fall through to ErrAuth after the timeout.
+		select {
+		case r := <-reply:
+			return r.PlayerID, r.Err
+		case <-time.After(500 * time.Millisecond):
+			return 0, ErrAuth
+		}
+	}
 }
 
 // SubmitInput posts a player input to the actor. Non-blocking when
@@ -369,6 +411,18 @@ func (m *Match) SubmitInput(playerID sim.EntityID, inp proto.Input) {
 // PHASE4.md §7.2.
 func (m *Match) SubmitPong(playerID sim.EntityID, rttMs uint32) {
 	m.in <- ctlPong{PlayerID: playerID, RTTMs: rttMs}
+}
+
+// SubmitClientPing forwards a client-initiated Ping to the actor, which
+// replies with a Pong via its sole writer path (sendFrameTo). Non-blocking
+// and best-effort: a dropped keepalive Pong is harmless, and routing it
+// through the actor keeps slot.out single-producer (see ctlClientPing).
+func (m *Match) SubmitClientPing(playerID sim.EntityID, tsOrigin uint32) {
+	select {
+	case m.in <- ctlClientPing{PlayerID: playerID, TsOrigin: tsOrigin}:
+	default:
+		// Inbox full — best-effort; the next ping will retry.
+	}
 }
 
 // SubmitClose informs the actor that a player's WS has closed.
@@ -441,18 +495,13 @@ func (m *Match) SubmitReconnect(token string, out chan<- OutboundFrame) (sim.Ent
 // JoinedCount returns the number of slots whose MatchJoin has been
 // processed AND who have not had their slot terminated (DC + grace
 // expiry deletes the slot entirely). DeadCam and DC-without-removal
-// slots count as joined. Snapshot read; safe for concurrent callers
-// only when the match is in StateEnded — otherwise this is best-effort
-// and may observe a race-window count off by one. The lobby uses this
-// only via the §10.2 zero-player sweeper which tolerates such drift.
+// slots count as joined. Safe for concurrent callers: it reads an atomic
+// mirror maintained by the actor goroutine rather than iterating m.slots
+// (which the actor concurrently delete()s from — a lock-free range there
+// would be a fatal "concurrent map iteration and map write" crash, not a
+// mere off-by-one). The lobby's §10.2 zero-player sweeper relies on this.
 func (m *Match) JoinedCount() int {
-	n := 0
-	for _, s := range m.slots {
-		if s.Joined {
-			n++
-		}
-	}
-	return n
+	return int(m.joinedCountAtomic.Load())
 }
 
 // RevokeToken removes a not-yet-consumed joinToken from the match
@@ -546,6 +595,8 @@ func (m *Match) handleControl(msg controlMsg) {
 		if est, ok := m.owt[v.PlayerID]; ok {
 			est.ObservePong(v.RTTMs)
 		}
+	case ctlClientPing:
+		m.handleClientPing(v)
 	case ctlClose:
 		m.handleClose(v)
 	case ctlDC:
@@ -617,6 +668,7 @@ func (m *Match) handleJoin(v ctlJoin) {
 	}
 	slot.Joined = true
 	slot.out = v.Out
+	m.joinedCountAtomic.Add(1)   // race-free external count (JoinedCount)
 	m.adjustJoined(1)            // joined-players gauge
 	delete(m.bySession, v.Token) // tokens are single-use
 
@@ -723,6 +775,29 @@ func (m *Match) startOrAbort() {
 	m.setState(StateLive)
 	m.startedAt = m.clock()
 
+	// A slot that DC'd during warmup (sim==nil at the time) has DC=true but
+	// an un-armed deadline (0) and no reconnect token — handleDC deferred all
+	// of that because there was no entity yet. Now that the sim exists, arm
+	// its grace window from the first live tick, freeze the entity, and
+	// register its reconnect token, so it behaves exactly like a mid-match DC
+	// instead of being dropped on tick 1 (DCDeadlineTick==0).
+	graceTicks := DCGraceTicks
+	if m.cfg.DCGraceTicksOverride != 0 {
+		graceTicks = m.cfg.DCGraceTicksOverride
+	}
+	for _, slot := range m.slots {
+		if !slot.Joined || !slot.DC || slot.DCDeadlineTick != 0 {
+			continue
+		}
+		slot.DCDeadlineTick = m.sim.ServerTick() + graceTicks
+		m.sim.FreezePlayer(slot.PlayerID)
+		if tok := m.tokenForPlayer(slot.PlayerID); tok != "" {
+			m.dcTokensMu.Lock()
+			m.dcTokens[tok] = slot.PlayerID
+			m.dcTokensMu.Unlock()
+		}
+	}
+
 	// Send MapInit/Scoreboard/Snapshot/match_started to every joined slot.
 	for _, slot := range m.slots {
 		if !slot.Joined {
@@ -798,6 +873,12 @@ func (m *Match) tick() {
 	now := m.sim.ServerTick()
 	for pid, slot := range m.slots {
 		if !slot.DC {
+			continue
+		}
+		// DCDeadlineTick==0 means "not yet armed" (a warmup DC awaiting
+		// startOrAbort), NOT "already expired" — skip it so the slot keeps
+		// its full grace window rather than being dropped immediately.
+		if slot.DCDeadlineTick == 0 {
 			continue
 		}
 		if now >= slot.DCDeadlineTick {
@@ -1018,6 +1099,7 @@ func (m *Match) adjustJoined(delta int) {
 func (m *Match) markUnjoined(slot *Slot) {
 	if slot.Joined {
 		slot.Joined = false
+		m.joinedCountAtomic.Add(-1)
 		m.adjustJoined(-1)
 	}
 }
@@ -1113,6 +1195,18 @@ func (m *Match) handleClose(v ctlClose) {
 	})
 	m.markUnjoined(slot)
 	m.closeSlot(slot)
+}
+
+// handleClientPing replies to a client-initiated Ping with a Pong, sent
+// via the actor's sole writer path (sendFrameTo nil-guards slot.out, so a
+// DC'd or closed slot is a no-op). PHASE4.md §4.3.3.
+func (m *Match) handleClientPing(v ctlClientPing) {
+	slot, ok := m.slots[v.PlayerID]
+	if !ok || !slot.Joined {
+		return
+	}
+	pong := proto.Pong{TsOrigin: v.TsOrigin, TsResponder: uint32(time.Now().UnixMilli())}
+	m.sendFrameTo(slot, proto.MsgPong, pong)
 }
 
 func (m *Match) closeSlot(slot *Slot) {

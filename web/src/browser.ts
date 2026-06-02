@@ -297,8 +297,10 @@ function renderRooms(
       const joinBtn = el("button", {
         "data-testid": "join-room", "data-room-id": r.id,
       }, "Join") as HTMLButtonElement;
-      // Can't join a room that's full or already in a match.
-      joinBtn.disabled = r.players >= r.max || r.state !== "open";
+      // Can't join a room that's full or already in a match. The server
+      // serializes RoomState in uppercase ("OPEN"/"STARTING"/...), so the
+      // compare must be uppercase — "open" left the button always disabled.
+      joinBtn.disabled = r.players >= r.max || r.state !== "OPEN";
       joinBtn.onclick = () => onJoin(r.id);
       li.append(joinBtn);
     }
