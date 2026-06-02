@@ -21,7 +21,7 @@ available from the cache at all times.
 > **Contributing:** apt-cacher-ultra accepts AI-authored contributions only.
 > See [CONTRIBUTING.md](CONTRIBUTING.md) for more details.
 
-![Admin UI](docs/admin-ui.png)
+![iSnipes Screen Shot](docs/isnipes.png)
 
 ## Status
 
