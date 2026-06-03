@@ -306,7 +306,8 @@ describe("draw path — atlas blit model (spec §5e)", () => {
     };
     const camFollow = r.camera(base);
     const camHeld = r.camera({ ...base, cameraOverride: { x: 100, y: 100 } });
-    expect(camHeld.x).not.toBe(camFollow.x);
+    expect(camFollow.x).toBeGreaterThan(0); // self far from origin → non-zero cam.x
+    expect(camHeld.x).toBe(0);              // override near origin → clamped to 0
   });
 
   test("deathFx draws red + dark fill passes", () => {
@@ -320,7 +321,9 @@ describe("draw path — atlas blit model (spec §5e)", () => {
       deathFx: { redAlpha: 0.5, dimAlpha: 0.8 },
     };
     r.draw(state, emptyHudModel());
-    expect(ctx.fills.some((f) => f.includes("220,30,30") || f.includes("220, 30, 30"))).toBe(true);
-    expect(ctx.fills.some((f) => f.startsWith("rgba(0,0,0") || f.startsWith("rgba(0, 0, 0"))).toBe(true);
+    const redIdx = ctx.fills.findIndex((f) => f.includes("220,30,30") || f.includes("220, 30, 30"));
+    const darkIdx = ctx.fills.findIndex((f) => f.startsWith("rgba(0,0,0") || f.startsWith("rgba(0, 0, 0"));
+    expect(redIdx).toBeGreaterThanOrEqual(0);   // red present
+    expect(darkIdx).toBeGreaterThan(redIdx);    // dark AFTER red (post-CRT)
   });
 });
