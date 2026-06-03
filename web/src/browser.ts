@@ -500,6 +500,11 @@ class MatchRunner {
         const mo = decodeMatchOver(payload);
         this.audio.onMatchOver(mo.reason);
         this.hud.endDialog = buildEndDialog(mo, this.hud.nickById);
+        // Clear any in-flight respawn overlay so "RESPAWNING n" doesn't float
+        // over the end-of-match dialog when a death also ends the match (e.g.
+        // last-standing). The sequencer's own safety timeout would clear it
+        // eventually, but the end screen is shown immediately.
+        this.hud.respawnCountdown = null;
         this.onEnd();
         break;
       }
