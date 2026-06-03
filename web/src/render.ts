@@ -85,6 +85,13 @@ export interface RenderState {
   entities: Entity[]; // interpolated non-self entities (subtile coords)
   renderTick: number;
   overlays?: ResolvedOverlay[]; // resolved muzzle/poof overlays to blit
+  // cameraOverride pins the camera to a world position regardless of
+  // selfPredicted (used during the death→respawn hold; the dead marine is
+  // not drawn because selfPredicted is null). See web/src/death.ts.
+  cameraOverride?: { x: number; y: number } | null;
+  // deathFx draws a red sting (pre-CRT) and a dark fade (post-CRT) over the
+  // whole canvas. Alphas come from the RespawnSequencer.
+  deathFx?: { redAlpha: number; dimAlpha: number };
 }
 
 // computeCamera centers (selfX, selfY) in the viewport, clamped so the
@@ -327,8 +334,8 @@ export class Renderer {
   // for tests + HUD/minimap reuse.
   camera(s: RenderState): Camera {
     const vp = { w: this.ctx.canvas.width, h: this.ctx.canvas.height };
-    const sx = s.selfPredicted?.x ?? 0;
-    const sy = s.selfPredicted?.y ?? 0;
+    const sx = s.cameraOverride?.x ?? s.selfPredicted?.x ?? 0;
+    const sy = s.cameraOverride?.y ?? s.selfPredicted?.y ?? 0;
     return computeCamera(sx, sy, vp, s.map ?? { W: 1, H: 1, at: () => TileCode.Wall });
   }
 
@@ -368,9 +375,21 @@ export class Renderer {
       for (const ov of s.overlays) this.drawOverlay(cam, ov);
     }
 
+    // Death sting: red flush UNDER the CRT pass so scanlines tint it.
+    if (s.deathFx && s.deathFx.redAlpha > 0) {
+      ctx.fillStyle = `rgba(220,30,30,${s.deathFx.redAlpha})`;
+      ctx.fillRect(0, 0, cam.w, cam.h);
+    }
+
     // CRT scanline + vignette pass over the whole canvas (spec §5e).
     if (this.retroFx) {
       ctx.drawImage(this.crt.image, 0, 0, cam.w, cam.h, 0, 0, cam.w, cam.h);
+    }
+
+    // Respawn fade: dark veil OVER the CRT pass for a uniform cover.
+    if (s.deathFx && s.deathFx.dimAlpha > 0) {
+      ctx.fillStyle = `rgba(0,0,0,${s.deathFx.dimAlpha})`;
+      ctx.fillRect(0, 0, cam.w, cam.h);
     }
   }
 

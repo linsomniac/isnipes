@@ -38,20 +38,22 @@ function fakeCtx(w: number, h: number): RenderCtx {
 
 // recordingCtx captures drawImage + arc calls so the draw-path tests can assert
 // the atlas/blit model (sprites are blitted; entities are NOT drawn as arcs).
+// `fills` captures the fillStyle value at each fillRect call (for deathFx tests).
 interface RecordingCtx extends RenderCtx {
   drawImageCalls: number;
   arcCalls: number;
+  fills: string[]; // fillStyle captured at each fillRect call
 }
 function recordingCtx(w: number, h: number): RecordingCtx {
   const rec: RecordingCtx = {
     canvas: { width: w, height: h },
     fillStyle: "", strokeStyle: "", lineWidth: 1,
-    clearRect: () => {}, fillRect: () => {},
+    clearRect: () => {}, fillRect: () => { rec.fills.push(String(rec.fillStyle)); },
     drawImage: () => { rec.drawImageCalls++; },
     beginPath: () => {}, arc: () => { rec.arcCalls++; }, moveTo: () => {}, lineTo: () => {},
     closePath: () => {}, fill: () => {}, stroke: () => {},
     save: () => {}, restore: () => {},
-    drawImageCalls: 0, arcCalls: 0,
+    drawImageCalls: 0, arcCalls: 0, fills: [],
   };
   return rec;
 }
@@ -291,5 +293,34 @@ describe("draw path — atlas blit model (spec §5e)", () => {
     };
     r.draw(s, emptyHudModel());
     expect(ctx.drawImageCalls).toBeGreaterThanOrEqual(2); // maze + 1 entity (+ crt)
+  });
+
+  test("cameraOverride takes precedence over selfPredicted", () => {
+    const ctx = fakeCtx(320, 240);
+    const r = new Renderer(ctx, DEFAULT_PALETTE);
+    r.setMap(openMaze(40, 30));
+    const base: RenderState = {
+      map: openMaze(40, 30), selfId: 1,
+      selfPredicted: { x: 5000, y: 5000, facing: 0, flags: 0 },
+      entities: [], renderTick: 0,
+    };
+    const camFollow = r.camera(base);
+    const camHeld = r.camera({ ...base, cameraOverride: { x: 100, y: 100 } });
+    expect(camHeld.x).not.toBe(camFollow.x);
+  });
+
+  test("deathFx draws red + dark fill passes", () => {
+    const ctx = recordingCtx(320, 240);
+    const r = new Renderer(ctx, DEFAULT_PALETTE);
+    r.setMap(openMaze(40, 30));
+    const state: RenderState = {
+      map: openMaze(40, 30), selfId: 1, selfPredicted: null,
+      entities: [], renderTick: 0,
+      cameraOverride: { x: 100, y: 100 },
+      deathFx: { redAlpha: 0.5, dimAlpha: 0.8 },
+    };
+    r.draw(state, emptyHudModel());
+    expect(ctx.fills.some((f) => f.includes("220,30,30") || f.includes("220, 30, 30"))).toBe(true);
+    expect(ctx.fills.some((f) => f.startsWith("rgba(0,0,0") || f.startsWith("rgba(0, 0, 0"))).toBe(true);
   });
 });
