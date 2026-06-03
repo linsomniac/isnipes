@@ -26,6 +26,7 @@ import {
   reasonText, winnerLabel, type HudModel, emptyHudModel, type ChatLine,
 } from "./hud.js";
 import { buildScene, isSceneName, type MatchScene, type LobbyScene } from "./scenes.js";
+import { RespawnSequencer } from "./death.js";
 
 const CLIENT_VERSION = "v0";
 // Logical render resolution = the fixed slice of maze always shown: at
@@ -86,6 +87,7 @@ interface UI {
   endDialog: HTMLElement;
   backBtn: HTMLButtonElement;
   status: HTMLElement;
+  respawnOverlay: HTMLElement;
 }
 
 function buildDOM(settings: Settings): UI {
@@ -164,8 +166,9 @@ function buildDOM(settings: Settings): UI {
   const chatInput = el("input", { "data-testid": "chat-input", hidden: "true" }) as HTMLInputElement;
   const backBtn = el("button", { "data-testid": "back-to-lobby" }, "Back to lobby") as HTMLButtonElement;
   const endDialog = el("div", { "data-testid": "end-dialog", hidden: "true" });
+  const respawnOverlay = el("div", { "data-testid": "respawn-overlay", hidden: "true" });
   const matchView = el("div", { "data-testid": "match-view" });
-  matchView.append(canvas, minimap, stats, scoreboard, chatBox, chatInput, endDialog);
+  matchView.append(canvas, minimap, stats, scoreboard, chatBox, chatInput, endDialog, respawnOverlay);
   const match = el("section", { id: "match", hidden: "true" });
   match.append(matchView);
 
@@ -175,7 +178,7 @@ function buildDOM(settings: Settings): UI {
     connecting, lobby, createBtn, nickInput, myRoom, myRoomId, myRoomPlayers, myRoomLink,
     startBtn, startHint, roomList, picker, pickerPreview, serverInput, serverList, cbToggle,
     hcToggle, rfxToggle, volSlider, presetSelect, match, matchView, canvas, minimap, stats, scoreboard,
-    chatBox, chatInput, endDialog, backBtn, status,
+    chatBox, chatInput, endDialog, backBtn, status, respawnOverlay,
   };
   serverAddBtn.onclick = () => {
     const next = addServer(settings.servers, serverInput.value, location.protocol);
@@ -215,6 +218,7 @@ function injectMatchStyles(): void {
 #match [data-testid="chat"] { position: absolute; left: 8px; bottom: 36px; max-width: 44ch; color: #dfe7ff; font: 13px/1.35 monospace; text-shadow: 0 0 4px #000; }
 #match [data-testid="chat-input"] { position: absolute; left: 8px; bottom: 8px; width: 44ch; }
 #match [data-testid="scoreboard"], #match [data-testid="end-dialog"] { position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); background: rgba(8, 12, 20, 0.92); color: #eaf2ff; padding: 16px 24px; border: 1px solid #2b3a55; border-radius: 6px; font: 14px/1.5 monospace; min-width: 240px; }
+#match [data-testid="respawn-overlay"] { position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); color: #ff5a5a; font: 700 28px/1.2 monospace; letter-spacing: 2px; text-shadow: 0 0 8px #000, 0 0 12px #000; pointer-events: none; }
 `;
   document.head.append(style);
 }
@@ -365,6 +369,12 @@ function renderHud(ui: UI, hud: HudModel): void {
   } else {
     ui.endDialog.hidden = true;
   }
+  if (hud.respawnCountdown != null) {
+    ui.respawnOverlay.hidden = false;
+    ui.respawnOverlay.textContent = `RESPAWNING ${hud.respawnCountdown}`;
+  } else {
+    ui.respawnOverlay.hidden = true;
+  }
 }
 
 function drawMinimap(ui: UI, maze: { W: number; H: number }, self: SelfPredicted, entities: Entity[]): void {
@@ -404,6 +414,9 @@ class MatchRunner {
   private onEnd: () => void;
   private lobbyOrigin: string;
   private chatKeyHandler: ((e: KeyboardEvent) => void) | null = null;
+  private respawn = new RespawnSequencer();
+  private lastSelfPos: { x: number; y: number } | null = null;
+  private lastKnownSelfId = 0;
 
   constructor(ui: UI, settings: Settings, lobbyOrigin: string, onEnd: () => void) {
     this.ui = ui;
@@ -588,11 +601,27 @@ class MatchRunner {
       ? { x: selfEntity.x, y: selfEntity.y, facing: selfEntity.facing, flags: selfEntity.flags }
       : null;
     const others = latest.entities.filter((e) => e.id !== latest.yourEntityID);
+
+    // Remember the live self id (stable across respawn) so we can read our
+    // lives from the scoreboard while dead (yourEntityID is 0 then).
+    if (latest.yourEntityID !== 0) this.lastKnownSelfId = latest.yourEntityID;
+    if (self) this.lastSelfPos = { x: self.x, y: self.y };
+    const selfRow = this.hud.rows.find((r) => r.id === this.lastKnownSelfId);
+    const livesRemaining = selfRow ? selfRow.lives : 1;
+    const fx = this.respawn.update({
+      selfPresent: self !== null,
+      selfPos: self ? { x: self.x, y: self.y } : null,
+      livesRemaining,
+      nowMs: performance.now(),
+    });
+
     this.renderer.draw(
       {
         map: this.mazeViewCache, selfId: latest.yourEntityID, selfPredicted: self,
         entities: others, renderTick: this.renderTick,
         overlays: this.resolveOverlays(),
+        cameraOverride: fx.cameraOverride,
+        deathFx: { redAlpha: fx.redAlpha, dimAlpha: fx.dimAlpha },
       },
       this.hud,
     );
@@ -606,6 +635,7 @@ class MatchRunner {
     if (selfEntity) this.hud.hp = selfEntity.hp;
     const row = this.hud.rows.find((r) => r.id === latest.yourEntityID);
     if (row) { this.hud.lives = row.lives; this.hud.score = row.score; }
+    this.hud.respawnCountdown = fx.countdown;
     renderHud(this.ui, this.hud);
   }
 
