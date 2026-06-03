@@ -6,6 +6,7 @@ import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import {
   computeSchemaChecksum,
+  sha256,
   decodeMapInit,
   decodeSnapshot,
   decodeFrame,
@@ -31,6 +32,36 @@ describe("schema checksum parity", () => {
     const got = await computeSchemaChecksum();
     const hex = "0x" + got.toString(16).toUpperCase().padStart(8, "0");
     expect(hex).toBe(want);
+  });
+
+  // sha256 fallback exists because crypto.subtle is undefined on plain-HTTP
+  // LAN pages (it's secure-context-only); without a fallback the client
+  // bootstrap throws before opening the lobby WS and hangs on "Connecting…".
+  test("sha256 fallback matches known vector", () => {
+    // SHA-256("abc") = ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad
+    const got = sha256(new TextEncoder().encode("abc"));
+    const hex = [...got].map((b) => b.toString(16).padStart(2, "0")).join("");
+    expect(hex).toBe(
+      "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
+    );
+  });
+
+  test("checksum is identical when crypto.subtle is unavailable", async () => {
+    const want = readFileSync(resolve(TESTDATA, "checksum.txt"), "utf8").trim();
+    const real = Object.getOwnPropertyDescriptor(globalThis, "crypto");
+    // Simulate an insecure context: crypto present but no subtle.
+    Object.defineProperty(globalThis, "crypto", {
+      value: {},
+      configurable: true,
+      writable: true,
+    });
+    try {
+      const got = await computeSchemaChecksum();
+      const hex = "0x" + got.toString(16).toUpperCase().padStart(8, "0");
+      expect(hex).toBe(want);
+    } finally {
+      if (real) Object.defineProperty(globalThis, "crypto", real);
+    }
   });
 });
 
