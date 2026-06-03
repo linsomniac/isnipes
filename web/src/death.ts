@@ -126,7 +126,12 @@ export class RespawnSequencer {
         }
         const t = nowMs - this.fadeInAtMs;
         if (t >= FADEIN_MS) { this.phase = "alive"; return idle(); }
-        return { cameraOverride: null, redAlpha: 0, dimAlpha: DIM_MAX * (1 - t / FADEIN_MS), countdown: null };
+        return {
+          cameraOverride: null,
+          redAlpha: 0,
+          dimAlpha: DIM_MAX * (1 - t / FADEIN_MS),
+          countdown: null,
+        };
       }
     }
   }

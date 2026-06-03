@@ -6,7 +6,7 @@ import { describe, expect, test } from "vitest";
 import {
   RespawnSequencer,
   redStingAlpha, dimRampAlpha, respawnCountdown,
-  RED_PEAK, RED_MS, HOLD_MS, DIM_MAX, RESPAWN_MS, FADEIN_MS, SAFETY_MS,
+  RED_PEAK, RED_MS, HOLD_MS, DIM_MAX, DIM_RAMP_MS, RESPAWN_MS, FADEIN_MS, SAFETY_MS,
 } from "../src/death.js";
 
 const ALIVE = (x: number, y: number, nowMs: number, lives = 3) =>
@@ -26,6 +26,8 @@ describe("redStingAlpha", () => {
 describe("dimRampAlpha", () => {
   test("0 during the hold, ramps to DIM_MAX after HOLD_MS", () => {
     expect(dimRampAlpha(HOLD_MS - 1)).toBe(0);
+    expect(dimRampAlpha(HOLD_MS + DIM_RAMP_MS / 2)).toBeCloseTo(DIM_MAX / 2);
+    expect(dimRampAlpha(HOLD_MS + DIM_RAMP_MS)).toBeCloseTo(DIM_MAX);
     expect(dimRampAlpha(RESPAWN_MS)).toBeCloseTo(DIM_MAX);
   });
 });
@@ -102,5 +104,23 @@ describe("RespawnSequencer", () => {
     const out = s.update(DEAD(1));
     expect(out.cameraOverride).toBeNull();
     expect(out.redAlpha).toBe(0);
+  });
+
+  test("vanish mid-fadein restarts dead sequence from spawn pos", () => {
+    const s = new RespawnSequencer();
+    s.update(ALIVE(10, 20, 0));
+    s.update(DEAD(1));
+    s.update(ALIVE(900, 900, 1 + RESPAWN_MS + 1)); // enters fadein
+    const out = s.update(DEAD(1 + RESPAWN_MS + 10, 3)); // vanishes again during fadein
+    expect(out.cameraOverride).toEqual({ x: 900, y: 900 });
+    expect(out.redAlpha).toBeCloseTo(RED_PEAK);
+  });
+
+  test("eliminated: self-reappearance resets to alive", () => {
+    const s = new RespawnSequencer();
+    s.update(ALIVE(10, 20, 0, 0));
+    s.update(DEAD(1, 0));
+    const out = s.update(ALIVE(10, 20, 2, 1));
+    expect(out).toEqual({ cameraOverride: null, redAlpha: 0, dimAlpha: 0, countdown: null });
   });
 });
