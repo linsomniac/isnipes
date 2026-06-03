@@ -6,6 +6,7 @@ import { describe, expect, test } from "vitest";
 import {
   walkFrame, dir8FromFacing, OverlayManager,
   WALK_FRAME_TICKS, MUZZLE_FLASH_TICKS, DEATH_POOF_TICKS,
+  GEN_PULSE_TICKS, genPulseFrame, faceLeft, damageStage, muzzleFrame, poofFrame,
 } from "../src/anim.js";
 import { EntityRegistry, EntityKind } from "../src/registry.js";
 import { EventKind } from "../src/proto.js";
@@ -106,5 +107,70 @@ describe("combat overlays", () => {
     expect(ov.active(DEATH_POOF_TICKS - 1).some((o) => o.kind === "poof")).toBe(true);
     expect(ov.active(DEATH_POOF_TICKS).some((o) => o.kind === "poof")).toBe(false);
     expect(ov.count()).toBe(0);
+  });
+});
+
+// docs/superpowers/specs/2026-06-02-enhanced-graphics-design.md §5b — the
+// Direction-D sprite-cell selector helpers. Every one is a pure function of
+// renderTick / static entity state (golden-frame determinism, §4/§7).
+describe("enhanced-graphics sprite-cell helpers", () => {
+  test("genPulseFrame cycles 0..3 every GEN_PULSE_TICKS, pure in renderTick", () => {
+    expect(genPulseFrame(0)).toBe(0);
+    expect(genPulseFrame(GEN_PULSE_TICKS - 1)).toBe(0); // stable within a window
+    expect(genPulseFrame(GEN_PULSE_TICKS)).toBe(1);
+    expect(genPulseFrame(2 * GEN_PULSE_TICKS)).toBe(2);
+    expect(genPulseFrame(3 * GEN_PULSE_TICKS)).toBe(3);
+    expect(genPulseFrame(4 * GEN_PULSE_TICKS)).toBe(0); // wraps
+    // Range + purity across a wide tick span.
+    for (let t = 0; t < 200; t++) {
+      const f = genPulseFrame(t);
+      expect(f).toBeGreaterThanOrEqual(0);
+      expect(f).toBeLessThanOrEqual(3);
+      expect(genPulseFrame(t)).toBe(f); // deterministic
+    }
+  });
+
+  test("faceLeft is true only for west-ward Dir8 headings (6,7,8)", () => {
+    expect(faceLeft(6)).toBe(true); // SW
+    expect(faceLeft(7)).toBe(true); // W
+    expect(faceLeft(8)).toBe(true); // NW
+    for (const f of [0, 1, 2, 3, 4, 5]) expect(faceLeft(f)).toBe(false);
+  });
+
+  test("damageStage maps hp/maxHp to 0|1|2 with ⅔ / ⅓ thresholds", () => {
+    expect(damageStage(3, 3)).toBe(0); // full
+    expect(damageStage(2, 3)).toBe(0); // ≥ ⅔
+    expect(damageStage(2, 4)).toBe(1); // ½ → cracked
+    expect(damageStage(1, 3)).toBe(1); // exactly ⅓ → cracked
+    expect(damageStage(1, 4)).toBe(2); // < ⅓ → critical
+    expect(damageStage(0, 3)).toBe(2); // dead → critical
+    // Guards: non-positive max and out-of-range hp stay in 0..2.
+    expect(damageStage(5, 0)).toBe(0);
+    for (const [hp, max] of [[10, 3], [-5, 3], [0, 1]] as const) {
+      const s = damageStage(hp, max);
+      expect(s).toBeGreaterThanOrEqual(0);
+      expect(s).toBeLessThanOrEqual(2);
+    }
+  });
+
+  test("muzzleFrame clamps age into 0..MUZZLE_FLASH_TICKS-1", () => {
+    expect(muzzleFrame(-3)).toBe(0);
+    expect(muzzleFrame(0)).toBe(0);
+    expect(muzzleFrame(3)).toBe(3);
+    expect(muzzleFrame(MUZZLE_FLASH_TICKS - 1)).toBe(MUZZLE_FLASH_TICKS - 1);
+    expect(muzzleFrame(MUZZLE_FLASH_TICKS)).toBe(MUZZLE_FLASH_TICKS - 1);
+    expect(muzzleFrame(999)).toBe(MUZZLE_FLASH_TICKS - 1);
+    // Pure in age.
+    expect(muzzleFrame(2)).toBe(muzzleFrame(2));
+  });
+
+  test("poofFrame clamps age into 0..DEATH_POOF_TICKS-1", () => {
+    expect(poofFrame(-1)).toBe(0);
+    expect(poofFrame(0)).toBe(0);
+    expect(poofFrame(7)).toBe(7);
+    expect(poofFrame(DEATH_POOF_TICKS - 1)).toBe(DEATH_POOF_TICKS - 1);
+    expect(poofFrame(DEATH_POOF_TICKS)).toBe(DEATH_POOF_TICKS - 1);
+    expect(poofFrame(10_000)).toBe(DEATH_POOF_TICKS - 1);
+    expect(poofFrame(5)).toBe(poofFrame(5));
   });
 });

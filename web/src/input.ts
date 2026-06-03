@@ -43,6 +43,14 @@ export const PRESETS: Record<Preset, Bindings> = {
   },
 };
 
+// vi-style movement keys (h/j/k/l) are always available for moving, on top of
+// whatever the active preset binds to the move actions. They don't take part in
+// rebinding/validation; an alias yields to a real binding on the same physical
+// key (no preset uses H/J/K/L). Movement convenience requested on top of §3.10.
+const VI_MOVE_ALIASES: Partial<Record<Action, string>> = {
+  moveN: "KeyK", moveS: "KeyJ", moveW: "KeyH", moveE: "KeyL",
+};
+
 // combineDir maps held N/E/S/W booleans to a Dir8 (adjacent pair →
 // diagonal; opposing pair → cancel; none → Idle).
 function combineDir(up: boolean, down: boolean, left: boolean, right: boolean): Dir {
@@ -94,10 +102,13 @@ export class InputController {
   private held = new Set<string>();
   // keyForAction is the reverse index, rebuilt on setBindings.
   private actionKey: Bindings;
+  // All physical keys claimed by a binding, so a vi-move alias can yield to one.
+  private boundKeys: Set<string>;
 
   constructor(bindings: Bindings = PRESETS.classic) {
     this.bindings = { ...bindings };
     this.actionKey = { ...bindings };
+    this.boundKeys = new Set(Object.values(bindings));
   }
 
   keyDown(code: string): void {
@@ -113,7 +124,10 @@ export class InputController {
   }
 
   private isHeld(action: Action): boolean {
-    return this.held.has(this.actionKey[action]);
+    if (this.held.has(this.actionKey[action])) return true;
+    // vi-style movement alias (h/j/k/l), unless that key is already bound.
+    const alias = VI_MOVE_ALIASES[action];
+    return alias !== undefined && !this.boundKeys.has(alias) && this.held.has(alias);
   }
 
   intent(): InputIntent {
@@ -137,6 +151,7 @@ export class InputController {
     if (conflict !== null) return { ok: false, conflict };
     this.bindings = { ...b };
     this.actionKey = { ...b };
+    this.boundKeys = new Set(Object.values(b));
     return { ok: true };
   }
 }

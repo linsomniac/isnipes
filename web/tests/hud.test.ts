@@ -7,6 +7,7 @@ import { describe, expect, test } from "vitest";
 import {
   decodeScoreboard, decodeMatchOver, orderRows, reasonText, winnerLabel,
   buildEndDialog, appendChat, plotMinimap, CHAT_RING_CAP, type ChatLine,
+  emptyHudModel,
 } from "../src/hud.js";
 
 // Build a Scoreboard (0x0B) payload:
@@ -164,4 +165,8 @@ describe("hud minimap", () => {
       expect(p.py).toBeLessThanOrEqual(rect.y + rect.h);
     }
   });
+});
+
+test("emptyHudModel has a null respawnCountdown", () => {
+  expect(emptyHudModel().respawnCountdown).toBeNull();
 });

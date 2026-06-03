@@ -9,8 +9,11 @@ coverage.out
 /web/test-results/
 /web/playwright-report/
 /web/coverage/
+# Local-only Playwright override (machine-specific Chrome path; never commit).
+/web/playwright.local.config.ts
 /node_modules/
 /.claude/
+/.superpowers/
 
 # Phase 8: embedded client build artifacts (produced by `make build`).
 /cmd/isnipes/dist/*

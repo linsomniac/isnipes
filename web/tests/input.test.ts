@@ -41,6 +41,29 @@ describe("input presets", () => {
     expect(f.intent().fireDir).toBe(Dir.NE);
   });
 
+  test("vi keys h/j/k/l move (in addition to the bound move keys)", () => {
+    const c = new InputController(PRESETS.classic);
+    c.keyDown("KeyK"); // up
+    expect(c.intent().dir).toBe(Dir.N);
+    c.keyUp("KeyK");
+    c.keyDown("KeyJ"); // down
+    expect(c.intent().dir).toBe(Dir.S);
+    c.keyUp("KeyJ");
+    c.keyDown("KeyL"); // right
+    expect(c.intent().dir).toBe(Dir.E);
+    c.keyDown("KeyK"); // right + up → NE diagonal
+    expect(c.intent().dir).toBe(Dir.NE);
+    // vi keys move, never fire.
+    expect(c.intent().fireDir).toBe(Dir.Idle);
+
+    // vi aliases compose with the bound arrows too (modern preset: WASD move,
+    // arrows fire — h/j/k/l still move, not fire).
+    const m = new InputController(PRESETS.modern);
+    m.keyDown("KeyL");
+    expect(m.intent().dir).toBe(Dir.E);
+    expect(m.intent().fireDir).toBe(Dir.Idle);
+  });
+
   test("keyUp clears held; clearHeld resets", () => {
     const c = new InputController(PRESETS.classic);
     c.keyDown("ArrowUp");

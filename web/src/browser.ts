@@ -11,13 +11,14 @@ import {
 } from "./proto.js";
 import { NetClient, type WebSocketLike } from "./netClient.js";
 import {
-  resolveMatchSocketUrl, normalizeServerUrl, loadSettings, saveSettings, addServer, type Settings,
+  resolveMatchSocketUrl, normalizeServerUrl, loadSettings, saveSettings, addServer,
+  SETTINGS_KEY, type Settings,
 } from "./settings.js";
 import { selectPalette } from "./palette.js";
 import { mazeViewFromMapInit } from "./maze.js";
-import { Renderer, type RenderState, type SelfPredicted } from "./render.js";
+import { Renderer, type RenderState, type SelfPredicted, type ResolvedOverlay } from "./render.js";
 import { EntityRegistry } from "./registry.js";
-import { OverlayManager } from "./anim.js";
+import { OverlayManager, muzzleFrame, poofFrame } from "./anim.js";
 import { AudioEngine, WebAudioSink } from "./audio.js";
 import { InputController, PRESETS } from "./input.js";
 import {
@@ -25,6 +26,7 @@ import {
   reasonText, winnerLabel, type HudModel, emptyHudModel, type ChatLine,
 } from "./hud.js";
 import { buildScene, isSceneName, type MatchScene, type LobbyScene } from "./scenes.js";
+import { RespawnSequencer } from "./death.js";
 
 const CLIENT_VERSION = "v0";
 // Logical render resolution = the fixed slice of maze always shown: at
@@ -71,6 +73,7 @@ interface UI {
   serverList: HTMLElement;
   cbToggle: HTMLInputElement;
   hcToggle: HTMLInputElement;
+  rfxToggle: HTMLInputElement;
   volSlider: HTMLInputElement;
   presetSelect: HTMLSelectElement;
   match: HTMLElement;
@@ -84,6 +87,7 @@ interface UI {
   endDialog: HTMLElement;
   backBtn: HTMLButtonElement;
   status: HTMLElement;
+  respawnOverlay: HTMLElement;
 }
 
 function buildDOM(settings: Settings): UI {
@@ -120,6 +124,8 @@ function buildDOM(settings: Settings): UI {
   cbToggle.checked = settings.colorBlind;
   const hcToggle = el("input", { type: "checkbox", "data-testid": "highcontrast-toggle" }) as HTMLInputElement;
   hcToggle.checked = settings.highContrast;
+  const rfxToggle = el("input", { type: "checkbox", "data-testid": "retrofx-toggle" }) as HTMLInputElement;
+  rfxToggle.checked = settings.retroFx;
   const volSlider = el("input", { type: "range", min: "0", max: "100", "data-testid": "volume" }) as HTMLInputElement;
   volSlider.value = String(Math.round(settings.masterVolume * 100));
   const serverInput = el("input", { "data-testid": "server-input", placeholder: "ws host" }) as HTMLInputElement;
@@ -130,6 +136,7 @@ function buildDOM(settings: Settings): UI {
     el("h3", {}, "Settings"),
     labeled("Nick", nickInput), labeled("Preset", presetSelect),
     labeled("Color-blind", cbToggle), labeled("High contrast", hcToggle),
+    labeled("Retro FX", rfxToggle),
     labeled("Volume", volSlider), labeled("Server", serverInput), serverAddBtn, serverList,
   );
 
@@ -159,8 +166,9 @@ function buildDOM(settings: Settings): UI {
   const chatInput = el("input", { "data-testid": "chat-input", hidden: "true" }) as HTMLInputElement;
   const backBtn = el("button", { "data-testid": "back-to-lobby" }, "Back to lobby") as HTMLButtonElement;
   const endDialog = el("div", { "data-testid": "end-dialog", hidden: "true" });
+  const respawnOverlay = el("div", { "data-testid": "respawn-overlay", hidden: "true" });
   const matchView = el("div", { "data-testid": "match-view" });
-  matchView.append(canvas, minimap, stats, scoreboard, chatBox, chatInput, endDialog);
+  matchView.append(canvas, minimap, stats, scoreboard, chatBox, chatInput, endDialog, respawnOverlay);
   const match = el("section", { id: "match", hidden: "true" });
   match.append(matchView);
 
@@ -169,8 +177,8 @@ function buildDOM(settings: Settings): UI {
   const ui: UI = {
     connecting, lobby, createBtn, nickInput, myRoom, myRoomId, myRoomPlayers, myRoomLink,
     startBtn, startHint, roomList, picker, pickerPreview, serverInput, serverList, cbToggle,
-    hcToggle, volSlider, presetSelect, match, matchView, canvas, minimap, stats, scoreboard,
-    chatBox, chatInput, endDialog, backBtn, status,
+    hcToggle, rfxToggle, volSlider, presetSelect, match, matchView, canvas, minimap, stats, scoreboard,
+    chatBox, chatInput, endDialog, backBtn, status, respawnOverlay,
   };
   serverAddBtn.onclick = () => {
     const next = addServer(settings.servers, serverInput.value, location.protocol);
@@ -210,6 +218,7 @@ function injectMatchStyles(): void {
 #match [data-testid="chat"] { position: absolute; left: 8px; bottom: 36px; max-width: 44ch; color: #dfe7ff; font: 13px/1.35 monospace; text-shadow: 0 0 4px #000; }
 #match [data-testid="chat-input"] { position: absolute; left: 8px; bottom: 8px; width: 44ch; }
 #match [data-testid="scoreboard"], #match [data-testid="end-dialog"] { position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); background: rgba(8, 12, 20, 0.92); color: #eaf2ff; padding: 16px 24px; border: 1px solid #2b3a55; border-radius: 6px; font: 14px/1.5 monospace; min-width: 240px; }
+#match [data-testid="respawn-overlay"] { position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); color: #ff5a5a; font: 700 28px/1.2 monospace; letter-spacing: 2px; text-shadow: 0 0 8px #000, 0 0 12px #000; pointer-events: none; }
 `;
   document.head.append(style);
 }
@@ -360,6 +369,12 @@ function renderHud(ui: UI, hud: HudModel): void {
   } else {
     ui.endDialog.hidden = true;
   }
+  if (hud.respawnCountdown != null) {
+    ui.respawnOverlay.hidden = false;
+    ui.respawnOverlay.textContent = `RESPAWNING ${hud.respawnCountdown}`;
+  } else {
+    ui.respawnOverlay.hidden = true;
+  }
 }
 
 function drawMinimap(ui: UI, maze: { W: number; H: number }, self: SelfPredicted, entities: Entity[]): void {
@@ -399,13 +414,20 @@ class MatchRunner {
   private onEnd: () => void;
   private lobbyOrigin: string;
   private chatKeyHandler: ((e: KeyboardEvent) => void) | null = null;
+  private respawn = new RespawnSequencer();
+  private lastKnownSelfId = 0;
 
   constructor(ui: UI, settings: Settings, lobbyOrigin: string, onEnd: () => void) {
     this.ui = ui;
     this.onEnd = onEnd;
     this.lobbyOrigin = lobbyOrigin;
     const ctx = ui.canvas.getContext("2d") as unknown as import("./render.js").RenderCtx;
-    this.renderer = new Renderer(ctx, selectPalette(settings.colorBlind, settings.highContrast));
+    this.renderer = new Renderer(
+      ctx,
+      selectPalette(settings.colorBlind, settings.highContrast),
+      undefined,
+      { retroFx: settings.retroFx },
+    );
     this.audio = new AudioEngine(new WebAudioSink(), this.reg, () => settings.masterVolume);
     this.input = new InputController(settings.bindings ?? PRESETS[settings.preset]);
   }
@@ -478,6 +500,11 @@ class MatchRunner {
         const mo = decodeMatchOver(payload);
         this.audio.onMatchOver(mo.reason);
         this.hud.endDialog = buildEndDialog(mo, this.hud.nickById);
+        // Clear any in-flight respawn overlay so "RESPAWNING n" doesn't float
+        // over the end-of-match dialog when a death also ends the match (e.g.
+        // last-standing). The sequencer's own safety timeout would clear it
+        // eventually, but the end screen is shown immediately.
+        this.hud.respawnCountdown = null;
         this.onEnd();
         break;
       }
@@ -547,6 +574,29 @@ class MatchRunner {
     this.ws.send(encodeFrame({ type: MsgType.Chat, flags: 0, seq: 0, ack: 0xffff, len: payload.length }, payload));
   }
 
+  // resolveOverlays maps the active combat overlays (muzzle/poof) to
+  // ResolvedOverlay{kind,x,y,frame} the renderer can blit (spec §5g): the
+  // anchor's world position comes from the registry (latest snapshot), the
+  // animation frame from muzzleFrame/poofFrame(renderTick - armedAtTick).
+  // Overlays whose anchor is no longer in the snapshot (outside AOI / evicted)
+  // are dropped — there's no on-screen position to draw them at.
+  private resolveOverlays(): ResolvedOverlay[] {
+    const out: ResolvedOverlay[] = [];
+    for (const o of this.overlays.active(this.renderTick)) {
+      const anchor = this.reg.get(o.anchorId);
+      if (!anchor) continue;
+      const age = this.renderTick - o.armedAtTick;
+      const frame = o.kind === "muzzle" ? muzzleFrame(age) : poofFrame(age);
+      out.push({ kind: o.kind, x: anchor.x, y: anchor.y, frame });
+    }
+    return out;
+  }
+
+  // setRetroFx flips the CRT pass on the live renderer (settings panel toggle).
+  setRetroFx(on: boolean): void {
+    this.renderer.setRetroFx(on);
+  }
+
   private drawFrame(): void {
     const latest = this.latest;
     if (!latest || !this.maze) { renderHud(this.ui, this.hud); return; }
@@ -555,8 +605,27 @@ class MatchRunner {
       ? { x: selfEntity.x, y: selfEntity.y, facing: selfEntity.facing, flags: selfEntity.flags }
       : null;
     const others = latest.entities.filter((e) => e.id !== latest.yourEntityID);
+
+    // Remember the live self id (stable across respawn) so we can read our
+    // lives from the scoreboard while dead (yourEntityID is 0 then).
+    if (latest.yourEntityID !== 0) this.lastKnownSelfId = latest.yourEntityID;
+    const selfRow = this.hud.rows.find((r) => r.id === this.lastKnownSelfId);
+    const livesRemaining = selfRow ? selfRow.lives : 1;
+    const fx = this.respawn.update({
+      selfPresent: self !== null,
+      selfPos: self ? { x: self.x, y: self.y } : null,
+      livesRemaining,
+      nowMs: performance.now(),
+    });
+
     this.renderer.draw(
-      { map: this.mazeViewCache, selfId: latest.yourEntityID, selfPredicted: self, entities: others, renderTick: this.renderTick },
+      {
+        map: this.mazeViewCache, selfId: latest.yourEntityID, selfPredicted: self,
+        entities: others, renderTick: this.renderTick,
+        overlays: this.resolveOverlays(),
+        cameraOverride: fx.cameraOverride,
+        deathFx: { redAlpha: fx.redAlpha, dimAlpha: fx.dimAlpha },
+      },
       this.hud,
     );
     if (self) drawMinimap(this.ui, this.maze, self, others);
@@ -569,6 +638,7 @@ class MatchRunner {
     if (selfEntity) this.hud.hp = selfEntity.hp;
     const row = this.hud.rows.find((r) => r.id === latest.yourEntityID);
     if (row) { this.hud.lives = row.lives; this.hud.score = row.score; }
+    this.hud.respawnCountdown = fx.countdown;
     renderHud(this.ui, this.hud);
   }
 
@@ -631,7 +701,15 @@ function renderMatchScene(ui: UI, scene: MatchScene, settings: Settings): void {
   ui.lobby.hidden = true;
   ui.match.hidden = false;
   const ctx = ui.canvas.getContext("2d") as unknown as import("./render.js").RenderCtx;
-  const renderer = new Renderer(ctx, selectPalette(settings.colorBlind, settings.highContrast));
+  // Golden scenes render with Retro FX on (spec §5g): the CRT pass is part of
+  // the baseline. settings.retroFx defaults true (loadSettings), but pass it
+  // explicitly so the scene matches the live MatchRunner's renderer.
+  const renderer = new Renderer(
+    ctx,
+    selectPalette(settings.colorBlind, settings.highContrast),
+    undefined,
+    { retroFx: settings.retroFx },
+  );
   renderer.setMap(scene.maze);
   renderer.draw(
     { map: scene.maze, selfId: scene.selfId, selfPredicted: scene.self, entities: scene.entities, renderTick: 0 },
@@ -643,12 +721,42 @@ function renderMatchScene(ui: UI, scene: MatchScene, settings: Settings): void {
 
 // ---- boot ----
 
+// hasSavedSettings reports whether a settings blob has ever been persisted.
+// Used at boot to decide the prefers-reduced-motion default: only a *fresh*
+// user (no saved blob) gets Retro FX defaulted off when they've asked the OS
+// to reduce motion — once they've saved a choice, it's respected (§5g).
+function hasSavedSettings(): boolean {
+  try {
+    return (globalThis as { localStorage?: { getItem(k: string): string | null } })
+      .localStorage?.getItem(SETTINGS_KEY) != null;
+  } catch {
+    return false;
+  }
+}
+
+function prefersReducedMotion(): boolean {
+  try {
+    const mm = (globalThis as { matchMedia?: (q: string) => { matches: boolean } }).matchMedia;
+    return mm ? mm("(prefers-reduced-motion: reduce)").matches : false;
+  } catch {
+    return false;
+  }
+}
+
 async function boot(): Promise<void> {
   const settings = loadSettings();
+  // First-run default: with no saved settings, honor the OS "reduce motion"
+  // preference by turning the CRT/retro pass off (§5g). A returning user's
+  // saved retroFx (true or false) is left untouched.
+  if (!hasSavedSettings() && prefersReducedMotion()) settings.retroFx = false;
   injectMatchStyles();
   const ui = buildDOM(settings);
   renderServerList(ui, settings);
-  applySettingsHandlers(ui, settings);
+  // The live match renderer lives on the active MatchRunner (created later);
+  // the Retro FX toggle reaches it through this getter so the CRT pass flips
+  // mid-match without a reload (spec §5g).
+  let runner: MatchRunner | null = null;
+  applySettingsHandlers(ui, settings, () => runner);
   // Scale the playfield to fill the window (fixed aspect, letterboxed) now and
   // whenever the window or fullscreen state changes.
   fitCanvas(ui.canvas);
@@ -678,7 +786,6 @@ async function boot(): Promise<void> {
   let pendingCreateName: string | null = null;
   let preCreateIds = new Set<string>();
   let selectedLevel = { letter: "A", number: 1 };
-  let runner: MatchRunner | null = null;
 
   const inviteLinkFor = (roomId: string): string =>
     `${location.origin}${location.pathname}?room=${roomId}`;
@@ -738,7 +845,7 @@ async function boot(): Promise<void> {
   app.start();
 }
 
-function applySettingsHandlers(ui: UI, settings: Settings): void {
+function applySettingsHandlers(ui: UI, settings: Settings, getRunner: () => MatchRunner | null): void {
   ui.nickInput.onchange = () => { settings.nick = ui.nickInput.value.slice(0, 24); saveSettings(settings); };
   ui.presetSelect.onchange = () => {
     settings.preset = ui.presetSelect.value === "modern" ? "modern" : "classic";
@@ -747,6 +854,12 @@ function applySettingsHandlers(ui: UI, settings: Settings): void {
   };
   ui.cbToggle.onchange = () => { settings.colorBlind = ui.cbToggle.checked; saveSettings(settings); };
   ui.hcToggle.onchange = () => { settings.highContrast = ui.hcToggle.checked; saveSettings(settings); };
+  // Retro FX toggle: persist + flip the CRT pass on the live renderer (§5g).
+  ui.rfxToggle.onchange = () => {
+    settings.retroFx = ui.rfxToggle.checked;
+    saveSettings(settings);
+    getRunner()?.setRetroFx(settings.retroFx);
+  };
   ui.volSlider.oninput = () => { settings.masterVolume = Number(ui.volSlider.value) / 100; saveSettings(settings); };
 }
 

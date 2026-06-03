@@ -1,12 +1,19 @@
 // PHASE7.md §15.1 — DoD #5/#6/#7. Camera-follow, maze-cache reuse, and
 // y-sort. Pure geometry is tested directly; the cache-reuse test uses a
 // recording fake ctx + a spy rasterizer (no real canvas needed).
+//
+// docs/superpowers/specs/2026-06-02-enhanced-graphics-design.md §5e, §7 — the
+// draw path is now an atlas/drawImage model (entities blit baked sprite cells,
+// not ctx.arc circles). These tests exercise draw() headless over every entity
+// kind + an overlay so the blit path runs and render.ts stays ≥70%; the
+// geometry + maze-cache-reuse invariants are kept verbatim.
 
 import { describe, expect, test, vi } from "vitest";
 import {
   computeCamera, worldToScreen, sortEntitiesForDraw, buildDrawList, colorForKind, Renderer,
-  TILE_PX, PX_PER_SUBTILE, type RenderCtx, type RenderState,
+  TILE_PX, PX_PER_SUBTILE, GEN_MAX_HP, type RenderCtx, type RenderState,
 } from "../src/render.js";
+import { damageStage } from "../src/anim.js";
 import { COLORBLIND_PALETTE } from "../src/palette.js";
 import { SUBTILE_PER_TILE, TileCode, type MazeView } from "../src/sim.js";
 import { DEFAULT_PALETTE } from "../src/palette.js";
@@ -26,6 +33,47 @@ function fakeCtx(w: number, h: number): RenderCtx {
     beginPath: () => {}, arc: () => {}, moveTo: () => {}, lineTo: () => {},
     closePath: () => {}, fill: () => {}, stroke: () => {},
     save: () => {}, restore: () => {},
+  };
+}
+
+// recordingCtx captures drawImage + arc calls so the draw-path tests can assert
+// the atlas/blit model (sprites are blitted; entities are NOT drawn as arcs).
+// `fills` captures the fillStyle value at each fillRect call (for deathFx tests).
+interface RecordingCtx extends RenderCtx {
+  drawImageCalls: number;
+  arcCalls: number;
+  fills: string[]; // fillStyle captured at each fillRect call
+}
+function recordingCtx(w: number, h: number): RecordingCtx {
+  const rec: RecordingCtx = {
+    canvas: { width: w, height: h },
+    fillStyle: "", strokeStyle: "", lineWidth: 1,
+    clearRect: () => {}, fillRect: () => { rec.fills.push(String(rec.fillStyle)); },
+    drawImage: () => { rec.drawImageCalls++; },
+    beginPath: () => {}, arc: () => { rec.arcCalls++; }, moveTo: () => {}, lineTo: () => {},
+    closePath: () => {}, fill: () => {}, stroke: () => {},
+    save: () => {}, restore: () => {},
+    drawImageCalls: 0, arcCalls: 0, fills: [],
+  };
+  return rec;
+}
+
+function allKindsState(): RenderState {
+  const maze = openMaze(40, 30);
+  return {
+    map: maze, selfId: 100,
+    selfPredicted: { x: 10 * SUBTILE_PER_TILE, y: 10 * SUBTILE_PER_TILE, facing: 7 /*W → faceLeft*/, flags: 0 },
+    entities: [
+      { id: 1, kind: 1, hp: 2, facing: 3, flags: 0, x: 11 * SUBTILE_PER_TILE, y: 8 * SUBTILE_PER_TILE, vx: 16, vy: 0 },
+      { id: 2, kind: 4, hp: 1, facing: 7, flags: 0, x: 12 * SUBTILE_PER_TILE, y: 9 * SUBTILE_PER_TILE, vx: 0, vy: 0 },
+      { id: 3, kind: 2, hp: 1, facing: 0, flags: 0, x: 14 * SUBTILE_PER_TILE, y: 7 * SUBTILE_PER_TILE, vx: 0, vy: 0 },
+      { id: 4, kind: 3, hp: 1, facing: 3, flags: 0, x: 9 * SUBTILE_PER_TILE, y: 6 * SUBTILE_PER_TILE, vx: 32, vy: 0 },
+    ],
+    renderTick: 12,
+    overlays: [
+      { kind: "muzzle", x: 11 * SUBTILE_PER_TILE, y: 8 * SUBTILE_PER_TILE, frame: 2 },
+      { kind: "poof", x: 12 * SUBTILE_PER_TILE, y: 9 * SUBTILE_PER_TILE, frame: 5 },
+    ],
   };
 }
 
@@ -93,6 +141,61 @@ describe("render geometry", () => {
     expect(list[1].kind).toBe(1);
   });
 
+  test("buildDrawList carries per-entity atlas data (id/facing/vx/vy/hp/isSelf)", () => {
+    const state: RenderState = {
+      map: openMaze(60, 40), selfId: 100,
+      selfPredicted: { x: 5, y: 5, facing: 7, flags: 0 },
+      entities: [
+        { id: 7, kind: 2, hp: 1, facing: 3, flags: 0, x: 0, y: 50, vx: 9, vy: -4 },
+      ],
+      renderTick: 0,
+    };
+    const list = buildDrawList(state, DEFAULT_PALETTE);
+    const gen = list.find((d) => d.id === 7)!;
+    expect(gen).toMatchObject({ kind: 2, facing: 3, vx: 9, vy: -4, hp: 1, isSelf: false });
+    // maxHp defaults to GEN_MAX_HP (3) when no observed-max lookup is supplied.
+    expect(gen.maxHp).toBe(GEN_MAX_HP);
+    const self = list.find((d) => d.id === 100)!;
+    // Self: id=selfId, facing from prediction, vx/vy 0, hp 0, isSelf true.
+    expect(self).toMatchObject({ kind: 1, facing: 7, vx: 0, vy: 0, hp: 0, isSelf: true });
+    expect(self.maxHp).toBe(GEN_MAX_HP);
+  });
+
+  test("buildDrawList uses the maxHp lookup as the damageStage denominator", () => {
+    // A brutal generator spawns at hp 5; the lookup (Renderer's observed-max)
+    // must flow onto DrawItem so damageStage(hp, maxHp) tracks true HP fraction
+    // (60% of 5 is cracked, not the "healthy" a fixed denominator of 3 gives).
+    const state: RenderState = {
+      map: openMaze(60, 40), selfId: 1, selfPredicted: null,
+      entities: [{ id: 9, kind: 2, hp: 3, facing: 0, flags: 0, x: 0, y: 0, vx: 0, vy: 0 }],
+      renderTick: 0,
+    };
+    const list = buildDrawList(state, DEFAULT_PALETTE, (_id, _hp) => 5);
+    const gen = list.find((d) => d.id === 9)!;
+    expect(gen.maxHp).toBe(5);
+    expect(damageStage(gen.hp, gen.maxHp)).toBe(1); // 3/5 = 0.6 → cracked
+    // With the old fixed-3 denominator this same generator read healthy (0):
+    expect(damageStage(gen.hp, GEN_MAX_HP)).toBe(0);
+  });
+
+  test("Renderer tracks each generator's observed spawn HP (brutal hp 5)", () => {
+    // Generators first appear at full HP, so the Renderer's running max recovers
+    // the true denominator (5 on brutal) and never decreases as the hive is hurt.
+    const ctx = recordingCtx(320, 240);
+    const r = new Renderer(ctx, DEFAULT_PALETTE);
+    r.setMap(openMaze(20, 20));
+    const frame = (hp: number): RenderState => ({
+      map: openMaze(20, 20), selfId: 1, selfPredicted: null,
+      entities: [{ id: 42, kind: 2, hp, facing: 0, flags: 0, x: 100, y: 100, vx: 0, vy: 0 }],
+      renderTick: 0,
+    });
+    // Spawn at full brutal HP, then take damage — must not throw and must keep
+    // the observed max (5) so later damage stages are correct.
+    expect(() => r.draw(frame(5), emptyHudModel())).not.toThrow();
+    expect(() => r.draw(frame(3), emptyHudModel())).not.toThrow();
+    expect(() => r.draw(frame(1), emptyHudModel())).not.toThrow();
+  });
+
   test("colorForKind distinguishes entity kinds (per palette)", () => {
     expect(colorForKind(1, DEFAULT_PALETTE)).toBe(DEFAULT_PALETTE.player);
     expect(colorForKind(2, DEFAULT_PALETTE)).toBe(DEFAULT_PALETTE.generator);
@@ -128,5 +231,99 @@ describe("maze cache", () => {
     // A new map (or palette change) rebuilds.
     r.setMap(openMaze(12, 12));
     expect(rasterize).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe("draw path — atlas blit model (spec §5e)", () => {
+  test("draw() blits sprite cells (drawImage) instead of arc circles", () => {
+    const ctx = recordingCtx(640, 480);
+    const r = new Renderer(ctx, DEFAULT_PALETTE);
+    r.setMap(openMaze(40, 30));
+    r.draw(allKindsState(), emptyHudModel());
+    // Entities are sprite blits now: no per-entity ctx.arc circle.
+    expect(ctx.arcCalls).toBe(0);
+    // One drawImage for the maze, one self-ring, one per entity (4) + self,
+    // two overlays, and the CRT pass — well above zero. Assert the blit model
+    // is exercised across maze + sprites + overlays + CRT.
+    // maze(1) + selfRing(1) + self(1) + 4 entities + 2 overlays + crt(1) = 10
+    expect(ctx.drawImageCalls).toBeGreaterThanOrEqual(10);
+  });
+
+  test("retroFx off drops the CRT blit; setRetroFx toggles it live", () => {
+    const state = allKindsState();
+    const offCtx = recordingCtx(640, 480);
+    const rOff = new Renderer(offCtx, DEFAULT_PALETTE, undefined, { retroFx: false });
+    rOff.setMap(openMaze(40, 30));
+    rOff.draw(state, emptyHudModel());
+    const offCount = offCtx.drawImageCalls;
+
+    const onCtx = recordingCtx(640, 480);
+    const rOn = new Renderer(onCtx, DEFAULT_PALETTE, undefined, { retroFx: true });
+    rOn.setMap(openMaze(40, 30));
+    rOn.draw(state, emptyHudModel());
+    // retroFx adds exactly one full-canvas CRT blit.
+    expect(onCtx.drawImageCalls).toBe(offCount + 1);
+
+    // Toggling live changes the next frame's blit count by one.
+    rOff.setRetroFx(true);
+    offCtx.drawImageCalls = 0;
+    rOff.draw(state, emptyHudModel());
+    expect(offCtx.drawImageCalls).toBe(offCount + 1);
+  });
+
+  test("setPalette rebuilds bakes without re-running draw; draw stays headless", () => {
+    const ctx = recordingCtx(320, 240);
+    const r = new Renderer(ctx, DEFAULT_PALETTE);
+    r.setMap(openMaze(20, 20));
+    // A palette swap rebuilds atlas/maze/CRT but must not throw headless.
+    expect(() => r.setPalette(COLORBLIND_PALETTE)).not.toThrow();
+    expect(() => r.draw(allKindsState(), emptyHudModel())).not.toThrow();
+  });
+
+  test("draw() without overlays/self still blits maze + entities", () => {
+    const ctx = recordingCtx(640, 480);
+    const r = new Renderer(ctx, DEFAULT_PALETTE);
+    r.setMap(openMaze(40, 30));
+    const s: RenderState = {
+      map: openMaze(40, 30), selfId: 1, selfPredicted: null,
+      entities: [
+        { id: 5, kind: 1, hp: 2, facing: 0, flags: 0, x: 100, y: 100, vx: 0, vy: 0 },
+      ],
+      renderTick: 0,
+    };
+    r.draw(s, emptyHudModel());
+    expect(ctx.drawImageCalls).toBeGreaterThanOrEqual(2); // maze + 1 entity (+ crt)
+  });
+
+  test("cameraOverride takes precedence over selfPredicted", () => {
+    const ctx = fakeCtx(320, 240);
+    const r = new Renderer(ctx, DEFAULT_PALETTE);
+    r.setMap(openMaze(40, 30));
+    const base: RenderState = {
+      map: openMaze(40, 30), selfId: 1,
+      selfPredicted: { x: 5000, y: 5000, facing: 0, flags: 0 },
+      entities: [], renderTick: 0,
+    };
+    const camFollow = r.camera(base);
+    const camHeld = r.camera({ ...base, cameraOverride: { x: 100, y: 100 } });
+    expect(camFollow.x).toBeGreaterThan(0); // self far from origin → non-zero cam.x
+    expect(camHeld.x).toBe(0);              // override near origin → clamped to 0
+  });
+
+  test("deathFx draws red + dark fill passes", () => {
+    const ctx = recordingCtx(320, 240);
+    const r = new Renderer(ctx, DEFAULT_PALETTE);
+    r.setMap(openMaze(40, 30));
+    const state: RenderState = {
+      map: openMaze(40, 30), selfId: 1, selfPredicted: null,
+      entities: [], renderTick: 0,
+      cameraOverride: { x: 100, y: 100 },
+      deathFx: { redAlpha: 0.5, dimAlpha: 0.8 },
+    };
+    r.draw(state, emptyHudModel());
+    const redIdx = ctx.fills.findIndex((f) => f.includes("220,30,30") || f.includes("220, 30, 30"));
+    const darkIdx = ctx.fills.findIndex((f) => f.startsWith("rgba(0,0,0") || f.startsWith("rgba(0, 0, 0"));
+    expect(redIdx).toBeGreaterThanOrEqual(0);   // red present
+    expect(darkIdx).toBeGreaterThan(redIdx);    // dark AFTER red (post-CRT)
   });
 });

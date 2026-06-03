@@ -10,6 +10,10 @@ export interface Settings {
   bindings: Bindings;
   colorBlind: boolean;
   highContrast: boolean;
+  // docs/superpowers/specs/2026-06-02-enhanced-graphics-design.md §5f —
+  // Direction-D CRT scanline+vignette retro pass toggle. On by default;
+  // boot flips it off under prefers-reduced-motion when no setting is saved.
+  retroFx: boolean;
   masterVolume: number; // 0..1
   nick: string;
   servers: string[]; // validated, normalized origins
@@ -30,6 +34,7 @@ export function defaultSettings(): Settings {
     bindings: { ...PRESETS.classic },
     colorBlind: false,
     highContrast: false,
+    retroFx: true,
     masterVolume: 0.7,
     nick: "",
     servers: [],
@@ -92,6 +97,8 @@ export function loadSettings(storage?: StorageLike): Settings {
     bindings,
     colorBlind: parsed.colorBlind === true,
     highContrast: parsed.highContrast === true,
+    // retroFx defaults true: absent/non-false stored value → on (§5f).
+    retroFx: parsed.retroFx !== false,
     masterVolume: clamp01(parsed.masterVolume as number),
     nick: typeof parsed.nick === "string" ? parsed.nick.slice(0, 24) : "",
     // Re-validate persisted servers: stored data is untrusted (could be
