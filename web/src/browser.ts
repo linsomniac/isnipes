@@ -415,7 +415,6 @@ class MatchRunner {
   private lobbyOrigin: string;
   private chatKeyHandler: ((e: KeyboardEvent) => void) | null = null;
   private respawn = new RespawnSequencer();
-  private lastSelfPos: { x: number; y: number } | null = null;
   private lastKnownSelfId = 0;
 
   constructor(ui: UI, settings: Settings, lobbyOrigin: string, onEnd: () => void) {
@@ -605,7 +604,6 @@ class MatchRunner {
     // Remember the live self id (stable across respawn) so we can read our
     // lives from the scoreboard while dead (yourEntityID is 0 then).
     if (latest.yourEntityID !== 0) this.lastKnownSelfId = latest.yourEntityID;
-    if (self) this.lastSelfPos = { x: self.x, y: self.y };
     const selfRow = this.hud.rows.find((r) => r.id === this.lastKnownSelfId);
     const livesRemaining = selfRow ? selfRow.lives : 1;
     const fx = this.respawn.update({
