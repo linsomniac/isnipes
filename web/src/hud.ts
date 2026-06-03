@@ -34,6 +34,10 @@ export interface HudModel {
   chat: ChatLine[]; // ring buffer, newest last
   deadCam: boolean;
   endDialog: EndDialog | null;
+  // respawnCountdown: integer seconds shown in the "RESPAWNING n" overlay
+  // during the death→respawn fade, or null when not respawning. Set by
+  // MatchRunner from the RespawnSequencer (web/src/death.ts).
+  respawnCountdown: number | null;
 }
 
 export const CHAT_RING_CAP = 50;
@@ -43,6 +47,7 @@ export function emptyHudModel(): HudModel {
     hp: 0, lives: 0, score: 0,
     rows: [], nickById: new Map(),
     showScoreboard: false, chat: [], deadCam: false, endDialog: null,
+    respawnCountdown: null,
   };
 }
 
