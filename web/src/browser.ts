@@ -23,7 +23,8 @@ import { AudioEngine, WebAudioSink } from "./audio.js";
 import { InputController, PRESETS } from "./input.js";
 import {
   decodeScoreboard, decodeMatchOver, buildEndDialog, appendChat, plotMinimap,
-  reasonText, winnerLabel, type HudModel, emptyHudModel, type ChatLine,
+  reasonText, winnerLabel, buildLastMatchView,
+  type HudModel, emptyHudModel, type ChatLine, type LastMatchView, type EndDialog,
 } from "./hud.js";
 import { buildScene, isSceneName, type MatchScene, type LobbyScene } from "./scenes.js";
 import { RespawnSequencer } from "./death.js";
@@ -513,6 +514,28 @@ function renderPreview(ui: UI, p: LevelPreset): void {
   ui.pickerPreview.setAttribute("data-level", `${p.letter}${p.number}`);
 }
 
+// renderLastMatch shows/hides the lobby "Last Match" recap card. Pass null to
+// clear it (dismissed, or when a new match starts).
+function renderLastMatch(ui: UI, view: LastMatchView | null): void {
+  ui.lastMatch.innerHTML = "";
+  if (!view) { ui.lastMatch.hidden = true; return; }
+  const head = el("div", { class: "ph" });
+  const dismiss = el("button", { class: "x-btn", "data-testid": "last-match-dismiss", title: "Dismiss" }, "✕") as HTMLButtonElement;
+  dismiss.onclick = () => renderLastMatch(ui, null);
+  head.append(text("Last Match"), dismiss);
+  ui.lastMatch.append(
+    head,
+    el("div", { class: "winner", "data-testid": "last-match-winner" }, `🏆 ${view.winner}`),
+    el("div", { class: "reason" }, view.reason),
+  );
+  for (const r of view.rows) {
+    const row = el("div", { class: "score-row", "data-testid": "last-match-row" });
+    row.append(el("span", {}, r.nick), el("span", {}, `${r.score}  (${r.lives}♥)`));
+    ui.lastMatch.append(row);
+  }
+  ui.lastMatch.hidden = false;
+}
+
 // ---- HUD rendering (DOM overlays; reused by live + scene paths) ----
 
 function renderHud(ui: UI, hud: HudModel): void {
@@ -824,6 +847,17 @@ class MatchRunner {
     if (this.chatKeyHandler) { this.ui.chatInput.removeEventListener("keydown", this.chatKeyHandler); this.chatKeyHandler = null; }
     try { this.nc?.close(); } catch { /* ignore */ }
   }
+
+  // lastResult returns the finished match's end dialog (winner + final scores),
+  // or null if the match never produced a MatchOver. Used to render the lobby
+  // "Last Match" recap on return.
+  // AIDEV-NOTE: returns the live hud.endDialog reference, not a copy. Safe
+  // because the sole caller (backBtn.onclick) passes it straight to
+  // buildLastMatchView, which deep-copies (orderRows clones the rows) before
+  // the runner is dropped. Don't retain this reference past that call.
+  lastResult(): EndDialog | null {
+    return this.hud.endDialog;
+  }
 }
 
 // truncateUtf8 returns the longest prefix of `bytes` ≤ max that does not
@@ -926,6 +960,7 @@ async function boot(): Promise<void> {
   injectMatchStyles();
   injectLobbyStyles();
   const ui = buildDOM(settings);
+  ui.lobby.classList.toggle("crt", settings.retroFx);
   renderServerList(ui, settings);
   // The live match renderer lives on the active MatchRunner (created later);
   // the Retro FX toggle reaches it through this getter so the CRT pass flips
@@ -979,12 +1014,20 @@ async function boot(): Promise<void> {
   };
   ui.startBtn.onclick = () => { if (myRoomId !== null) app.lobby.startMatch(myRoomId); };
   ui.backBtn.onclick = () => {
+    const res = runner?.lastResult() ?? null;
     runner?.stop(); runner = null;
     app.backToLobby();
     ui.match.hidden = true; ui.lobby.hidden = false; ui.endDialog.hidden = true;
+    renderLastMatch(ui, res ? buildLastMatchView(res) : null);
   };
 
-  app.onWelcome = () => { ui.connecting.hidden = true; ui.lobby.hidden = false; };
+  app.onWelcome = () => {
+    ui.connecting.hidden = true; ui.lobby.hidden = false;
+    // AIDEV-NOTE: connStatus only advances connecting -> connected; there is no
+    // LobbyClient onClose/onError hook to reset it, so a mid-session WS drop
+    // leaves the indicator green. Wire a reset here if a reconnect story lands.
+    ui.connStatus.textContent = "● connected"; ui.connStatus.classList.add("live");
+  };
   app.lobby.onLevelPresets = (presets) => {
     renderPicker(ui, presets, (p) => { selectedLevel = { letter: p.letter, number: p.number }; });
     if (presets.length > 0) renderPreview(ui, presets[0]);
@@ -1012,6 +1055,7 @@ async function boot(): Promise<void> {
   };
   app.onMatchStarted = (ms: MatchStarted) => {
     ui.lobby.hidden = true; ui.match.hidden = false; ui.endDialog.hidden = true;
+    renderLastMatch(ui, null);
     runner = new MatchRunner(ui, settings, lobbyOrigin, () => app.endMatch());
     runner.connect(ms, schemaChecksum);
   };
@@ -1034,6 +1078,7 @@ function applySettingsHandlers(ui: UI, settings: Settings, getRunner: () => Matc
     settings.retroFx = ui.rfxToggle.checked;
     saveSettings(settings);
     getRunner()?.setRetroFx(settings.retroFx);
+    ui.lobby.classList.toggle("crt", settings.retroFx);
   };
   ui.volSlider.oninput = () => { settings.masterVolume = Number(ui.volSlider.value) / 100; saveSettings(settings); };
 }
