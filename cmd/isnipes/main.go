@@ -83,6 +83,11 @@ func main() {
 	// snapshot drops into it (PHASE8 §6.4/§6.5).
 	metrics := observ.NewRegistry()
 
+	// lob is referenced by the registry's OnMatchEnded hook below, so it is
+	// declared first and the closure captures it by reference. lob is assigned
+	// immediately after (before the HTTP server starts), so no match can end —
+	// and fire the hook — until lob is non-nil.
+	var lob *lobby.Lobby
 	registry := match.NewRegistry(match.RegistryConfig{
 		MaxConcurrentMatches: *maxMatches,
 		TickSampler:          metrics.TickHistogram(),
@@ -90,8 +95,10 @@ func main() {
 		OnSnapshotDrop:       metrics.IncSnapshotDrop,
 		OnJoinedDelta:        metrics.AddJoinedPlayers,
 		OnActiveMatchesDelta: metrics.AddActiveMatches,
+		// Match end → lobby: close & remove the hosting room (stale-room fix).
+		OnMatchEnded: func(id string) { lob.MatchEnded(id) },
 	})
-	lob := lobby.NewLobby(lobby.Config{
+	lob = lobby.NewLobby(lobby.Config{
 		Registry:      registry,
 		MOTD:          *motd,
 		ServerVersion: version,
