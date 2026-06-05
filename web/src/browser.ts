@@ -223,6 +223,89 @@ function injectMatchStyles(): void {
   document.head.append(style);
 }
 
+// injectLobbyStyles installs the Command Deck theme once, scoped to #lobby
+// (the match view has its own injected styles). The lobby stays in normal
+// document flow (min-height shell) so document.body keeps a non-zero height —
+// a position:fixed lobby would collapse body to 0px and break Playwright
+// visibility / scene-ready markers.
+function injectLobbyStyles(): void {
+  if (document.getElementById("isnipes-lobby-style")) return;
+  const style = document.createElement("style");
+  style.id = "isnipes-lobby-style";
+  style.textContent = `
+body { margin: 0; background: #07070b; }
+#lobby.lobby-shell {
+  --panel: rgba(18,22,32,.72); --line: #234a66; --line-dim: #1d3247;
+  --cyan: #4fd1ff; --cyan-bright: #8af0ff; --neon: #1aa0e6;
+  --text: #cfe3ff; --text-dim: #86b9d8; --muted: #6f7a92;
+  --lime: #8aff80; --yellow: #ffd166;
+  position: relative; min-height: 100vh; box-sizing: border-box;
+  margin: 0; padding: 18px 16px 28px;
+  background: radial-gradient(1200px 600px at 50% -10%, #10131c 0%, #0a0a0f 60%);
+  color: var(--text);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+#lobby.lobby-shell.crt::after {
+  content: ""; position: fixed; inset: 0; pointer-events: none; z-index: 50;
+  background: repeating-linear-gradient(0deg, rgba(0,0,0,.16) 0, rgba(0,0,0,.16) 1px, transparent 1px, transparent 3px);
+  opacity: .5;
+}
+#lobby .deck { max-width: 980px; margin: 0 auto; display: flex; flex-direction: column; gap: 12px; }
+#lobby .deck-hdr { display: flex; align-items: flex-end; justify-content: space-between; gap: 12px; flex-wrap: wrap; border-bottom: 1px solid var(--line-dim); padding-bottom: 10px; }
+#lobby .brand { margin: 0; font-weight: 800; letter-spacing: 5px; font-size: 30px; color: var(--cyan-bright); text-shadow: 0 0 10px var(--neon), 0 0 22px var(--neon); }
+#lobby .tag { margin-top: 2px; font-size: 10px; letter-spacing: 3px; color: var(--muted); }
+#lobby .ident { display: flex; align-items: center; gap: 8px; font-size: 12px; }
+#lobby .conn { color: var(--muted); }
+#lobby .conn.live { color: var(--lime); }
+#lobby #nick { background: #0e1622; border: 1px solid var(--line); border-radius: 5px; color: var(--text); font: inherit; font-size: 12px; padding: 4px 8px; width: 14ch; }
+#lobby .deck-cols { display: flex; gap: 12px; align-items: flex-start; }
+#lobby .deck-right { display: flex; flex-direction: column; gap: 12px; flex: 1; min-width: 0; }
+#lobby .play { flex: 1.15; min-width: 0; }
+#lobby .panel { border: 1px solid var(--line); border-radius: 10px; background: var(--panel); padding: 12px 13px; }
+#lobby .panel.glow { border-color: var(--neon); box-shadow: 0 0 14px rgba(26,160,230,.25) inset; }
+#lobby .ph { margin: 0 0 8px; font-size: 10px; letter-spacing: 2px; text-transform: uppercase; color: #5fb0e6; display: flex; align-items: center; justify-content: space-between; }
+#lobby button { font-family: inherit; cursor: pointer; }
+#lobby #create-room, #lobby #start-btn { display: inline-block; margin-top: 2px; font-size: 13px; font-weight: 700; color: #04121c; background: linear-gradient(#7fe9ff, var(--neon)); border: none; border-radius: 6px; padding: 8px 14px; letter-spacing: .5px; box-shadow: 0 0 10px rgba(26,160,230,.5); }
+#lobby #start-btn:disabled { filter: grayscale(.7) brightness(.7); cursor: not-allowed; box-shadow: none; }
+#lobby [data-testid="join-room"], #lobby .ghost-btn { font-size: 11px; color: var(--cyan); background: transparent; border: 1px solid #2f6088; border-radius: 5px; padding: 2px 9px; }
+#lobby [data-testid="join-room"]:disabled { color: var(--muted); border-color: #26384a; cursor: not-allowed; }
+#lobby #my-room { margin-top: 10px; font-size: 13px; line-height: 1.7; }
+#lobby #my-room-id { color: var(--cyan-bright); font-weight: 700; }
+#lobby [data-testid="invite"] { font-size: 11px; color: var(--text-dim); margin-top: 4px; }
+#lobby [data-testid="room-link"] { color: var(--cyan); word-break: break-all; }
+#lobby [data-testid="start-hint"] { color: var(--muted); font-size: 11px; }
+#lobby #level-picker { display: grid; grid-template-columns: repeat(9, 1fr); gap: 4px; margin-top: 6px; max-height: 140px; overflow-y: auto; padding-right: 4px; }
+#lobby [data-testid="level-cell"] { font-size: 10px; text-align: center; padding: 5px 0; border: 1px solid #294f6c; border-radius: 4px; color: #9fd6f0; background: #0e1c28; }
+#lobby [data-testid="level-cell"]:hover { border-color: var(--cyan); }
+#lobby [data-testid="level-cell"].on { background: #15405a; border-color: var(--cyan); color: #d6f3ff; box-shadow: 0 0 7px var(--neon); }
+#lobby [data-testid="level-preview"] { font-size: 11px; color: var(--text-dim); margin-top: 8px; border-top: 1px dashed #21384c; padding-top: 7px; }
+#lobby #room-list { list-style: none; margin: 0; padding: 0; font-size: 12px; }
+#lobby [data-testid="room-row"] { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 4px 0; border-bottom: 1px solid var(--line-dim); }
+#lobby [data-testid="no-rooms"] { color: var(--muted); font-style: italic; padding: 4px 0; }
+#lobby [data-testid="last-match"] .winner { color: var(--yellow); font-weight: 700; }
+#lobby [data-testid="last-match"] .reason { color: var(--text-dim); font-size: 11px; margin: 2px 0 6px; }
+#lobby [data-testid="last-match"] .score-row { display: flex; justify-content: space-between; font-size: 12px; color: #bcd2e8; padding: 1px 0; }
+#lobby .x-btn { background: transparent; border: none; color: var(--muted); font-size: 13px; }
+#lobby .x-btn:hover { color: var(--cyan); }
+#lobby .cheat { display: flex; gap: 16px; flex-wrap: wrap; align-items: center; font-size: 12px; color: #bcd2e8; }
+#lobby .key { color: #04121c; background: #9fd6f0; border-radius: 3px; padding: 0 5px; font-weight: 700; font-size: 11px; }
+#lobby [data-testid="howto-toggle"] { font-size: 10px; color: var(--cyan); background: transparent; border: 1px solid #2f6088; border-radius: 5px; padding: 1px 8px; letter-spacing: 1px; }
+#lobby [data-testid="howto-full"] { margin-top: 10px; font-size: 12px; line-height: 1.6; color: var(--text-dim); border-top: 1px solid var(--line-dim); padding-top: 9px; }
+#lobby [data-testid="howto-full"] h4 { margin: 10px 0 4px; color: #7fc6f0; font-size: 11px; letter-spacing: 1.5px; text-transform: uppercase; }
+#lobby [data-testid="howto"] { margin: 4px 0 0; padding-left: 18px; }
+#lobby .settings-details { border: 1px solid var(--line-dim); border-radius: 10px; background: rgba(14,18,26,.6); padding: 4px 12px; }
+#lobby .settings-details > summary { cursor: pointer; font-size: 11px; letter-spacing: 2px; text-transform: uppercase; color: #5fb0e6; padding: 7px 0; }
+#lobby .settings-details[open] > summary { border-bottom: 1px solid var(--line-dim); margin-bottom: 8px; }
+#lobby [data-testid="settings"] h3 { display: none; }
+#lobby [data-testid="settings"] label { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; color: var(--text-dim); margin: 0 12px 8px 0; }
+#lobby [data-testid="server-input"] { background: #0e1622; border: 1px solid var(--line); border-radius: 5px; color: var(--text); font: inherit; font-size: 12px; padding: 3px 7px; }
+#lobby [data-testid="server-list"] { list-style: none; margin: 6px 0 0; padding: 0; font-size: 11px; }
+#lobby [data-testid="server-select"] { background: transparent; border: none; color: var(--text-dim); }
+@media (max-width: 720px) { #lobby .deck-cols { flex-direction: column; } }
+`;
+  document.head.append(style);
+}
+
 // fitCanvas scales the fixed-resolution canvas (CANVAS_W × CANVAS_H backing
 // store) to fill the window while preserving its aspect ratio, letterboxing the
 // remainder. Only the CSS display size changes — the backing store, and thus
@@ -750,6 +833,7 @@ async function boot(): Promise<void> {
   // saved retroFx (true or false) is left untouched.
   if (!hasSavedSettings() && prefersReducedMotion()) settings.retroFx = false;
   injectMatchStyles();
+  injectLobbyStyles();
   const ui = buildDOM(settings);
   renderServerList(ui, settings);
   // The live match renderer lives on the active MatchRunner (created later);
