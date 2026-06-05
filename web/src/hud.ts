@@ -145,6 +145,23 @@ export function buildEndDialog(mo: MatchOverData, nickById: Map<number, string>)
   return { reason: mo.reason, winnerId: mo.winnerId, rows: orderRows(rows) };
 }
 
+export interface LastMatchView {
+  reason: string; // prose end reason
+  winner: string; // winner display name, or "No single winner"
+  rows: ScoreRow[]; // ordered desc score, asc id
+}
+
+// buildLastMatchView turns a finished match's EndDialog into the lobby
+// "Last Match" recap view-model. The winner name is resolved from the
+// already-nick-joined rows (no separate nick map needed).
+export function buildLastMatchView(d: EndDialog): LastMatchView {
+  const winner =
+    d.winnerId === 0
+      ? "No single winner"
+      : (d.rows.find((r) => r.id === d.winnerId)?.nick ?? `Player ${d.winnerId}`);
+  return { reason: reasonText(d.reason), winner, rows: orderRows(d.rows) };
+}
+
 // appendChat pushes a line into the ring buffer, trimming to CHAT_RING_CAP.
 export function appendChat(chat: ChatLine[], line: ChatLine): ChatLine[] {
   const next = [...chat, line];

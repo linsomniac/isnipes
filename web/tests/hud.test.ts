@@ -7,7 +7,7 @@ import { describe, expect, test } from "vitest";
 import {
   decodeScoreboard, decodeMatchOver, orderRows, reasonText, winnerLabel,
   buildEndDialog, appendChat, plotMinimap, CHAT_RING_CAP, type ChatLine,
-  emptyHudModel,
+  emptyHudModel, buildLastMatchView,
 } from "../src/hud.js";
 
 // Build a Scoreboard (0x0B) payload:
@@ -169,4 +169,28 @@ describe("hud minimap", () => {
 
 test("emptyHudModel has a null respawnCountdown", () => {
   expect(emptyHudModel().respawnCountdown).toBeNull();
+});
+
+describe("buildLastMatchView", () => {
+  const rows = [
+    { id: 1, nick: "Cyan", lives: 2, score: 120 },
+    { id: 2, nick: "Lime", lives: 0, score: 80 },
+  ];
+  test("resolves winner nick from rows + prose reason", () => {
+    const v = buildLastMatchView({ reason: 1, winnerId: 1, rows });
+    expect(v.winner).toBe("Cyan");
+    expect(v.reason).toBe("Last one standing");
+    expect(v.rows).toHaveLength(2);
+    expect(v.rows).toEqual(rows);
+  });
+  test("winnerId 0 -> no single winner", () => {
+    const v = buildLastMatchView({ reason: 2, winnerId: 0, rows });
+    expect(v.winner).toBe("No single winner");
+    expect(v.reason).toBe("All players eliminated");
+  });
+  test("unknown winner id falls back to Player <id>", () => {
+    const v = buildLastMatchView({ reason: 1, winnerId: 99, rows });
+    expect(v.winner).toBe("Player 99");
+    expect(v.reason).toBe("Last one standing");
+  });
 });
