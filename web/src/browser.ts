@@ -88,6 +88,8 @@ interface UI {
   backBtn: HTMLButtonElement;
   status: HTMLElement;
   respawnOverlay: HTMLElement;
+  connStatus: HTMLElement;
+  lastMatch: HTMLElement;
 }
 
 function buildDOM(settings: Settings): UI {
@@ -134,7 +136,7 @@ function buildDOM(settings: Settings): UI {
   const settingsPanel = el("section", { "data-testid": "settings" });
   settingsPanel.append(
     el("h3", {}, "Settings"),
-    labeled("Nick", nickInput), labeled("Preset", presetSelect),
+    labeled("Preset", presetSelect),
     labeled("Color-blind", cbToggle), labeled("High contrast", hcToggle),
     labeled("Retro FX", rfxToggle),
     labeled("Volume", volSlider), labeled("Server", serverInput), serverAddBtn, serverList,
@@ -147,15 +149,60 @@ function buildDOM(settings: Settings): UI {
     "Get a second player in: open your room’s invite link in another browser window, or have them click “Join” next to your room in the list. A match needs at least 2 players.",
     "Click “Start match” once someone has joined.",
   ]) howto.append(el("li", {}, step));
-  const howtoBox = el("section", { "data-testid": "howto-box" });
-  howtoBox.append(el("h2", {}, "How to start a game"), howto);
+  const howtoBox = el("section", { class: "panel howto", "data-testid": "howto-box" });
 
-  const lobby = el("section", { id: "lobby", "data-testid": "lobby", hidden: "true" });
-  lobby.append(
-    el("h1", {}, "Lobby"), howtoBox, createBtn, myRoom,
-    el("h2", {}, "Levels"), picker, pickerPreview,
-    el("h2", {}, "Rooms"), roomList, settingsPanel,
+  // ---- header: brand + connection + nick ----
+  const connStatus = el("span", { class: "conn", "data-testid": "conn-status" }, "● connecting…");
+  const brandWrap = el("div", {});
+  brandWrap.append(
+    el("h1", { class: "brand" }, "ISNIPES"),
+    el("div", { class: "tag" }, "MAZE · SNIPES · LAST ONE STANDING"),
   );
+  const ident = el("div", { class: "ident" });
+  ident.append(connStatus, el("label", { for: "nick" }, "nick"), nickInput);
+  const header = el("header", { class: "deck-hdr", "data-testid": "lobby-header" });
+  header.append(brandWrap, ident);
+
+  // ---- left: play panel ----
+  const playPanel = el("section", { class: "panel glow play", "data-testid": "play-panel" });
+  playPanel.append(
+    el("div", { class: "ph" }, "▶ Play"),
+    createBtn, myRoom,
+    el("div", { class: "ph" }, "Level"), picker, pickerPreview,
+  );
+
+  // ---- right: live games + last match ----
+  const gamesPanel = el("section", { class: "panel games" });
+  gamesPanel.append(el("div", { class: "ph" }, "Live Games"), roomList);
+  const lastMatch = el("section", { class: "panel", "data-testid": "last-match", hidden: "true" });
+  const deckRight = el("div", { class: "deck-right" });
+  deckRight.append(gamesPanel, lastMatch);
+
+  const deckCols = el("div", { class: "deck-cols" });
+  deckCols.append(playPanel, deckRight);
+
+  // ---- how to play: cheat bar + expandable guide ----
+  const howtoToggle = el("button", { class: "ghost-btn", "data-testid": "howto-toggle" }, "More ▾") as HTMLButtonElement;
+  const howtoFull = el("div", { "data-testid": "howto-full", hidden: "true" });
+  buildHowtoFull(howtoFull, howto);
+  const howtoHead = el("div", { class: "ph" });
+  howtoHead.append(text("How to Play"), howtoToggle);
+  howtoBox.append(howtoHead, buildCheatBar(), howtoFull);
+  howtoToggle.onclick = () => {
+    const opening = howtoFull.hidden;
+    howtoFull.hidden = !opening;
+    howtoToggle.textContent = opening ? "Less ▴" : "More ▾";
+  };
+
+  // ---- settings (collapsible) ----
+  const settingsDetails = el("details", { class: "settings-details" });
+  settingsDetails.append(el("summary", {}, "⚙ Settings"), settingsPanel);
+
+  // ---- assemble ----
+  const deck = el("div", { class: "deck" });
+  deck.append(header, deckCols, howtoBox, settingsDetails);
+  const lobby = el("section", { id: "lobby", class: "lobby-shell", "data-testid": "lobby", hidden: "true" });
+  lobby.append(deck);
 
   // match
   const canvas = el("canvas", { id: "game", width: String(CANVAS_W), height: String(CANVAS_H) }) as HTMLCanvasElement;
@@ -178,7 +225,7 @@ function buildDOM(settings: Settings): UI {
     connecting, lobby, createBtn, nickInput, myRoom, myRoomId, myRoomPlayers, myRoomLink,
     startBtn, startHint, roomList, picker, pickerPreview, serverInput, serverList, cbToggle,
     hcToggle, rfxToggle, volSlider, presetSelect, match, matchView, canvas, minimap, stats, scoreboard,
-    chatBox, chatInput, endDialog, backBtn, status, respawnOverlay,
+    chatBox, chatInput, endDialog, backBtn, status, respawnOverlay, connStatus, lastMatch,
   };
   serverAddBtn.onclick = () => {
     const next = addServer(settings.servers, serverInput.value, location.protocol);
@@ -195,6 +242,49 @@ function labeled(name: string, control: HTMLElement): HTMLElement {
 
 function text(s: string): Text {
   return document.createTextNode(s);
+}
+
+// buildCheatBar renders the always-visible How-to-Play strip (controls + scoring).
+function buildCheatBar(): HTMLElement {
+  const cheat = el("div", { class: "cheat", "data-testid": "howto-cheat" });
+  const cap = (k: string, label: string): HTMLElement => {
+    const s = el("span", {});
+    s.append(el("span", { class: "key" }, k), text(" " + label));
+    return s;
+  };
+  cheat.append(
+    cap("↑↓←→", "move"), cap("W A S D", "fire"), cap("Space", "turbo"),
+    cap("T", "chat"), cap("Tab", "scores"),
+    el("span", { class: "score-line" }, "score  snipe +1 · gen +10 · kill +25 · death −5"),
+  );
+  return cheat;
+}
+
+// buildHowtoFull fills the expandable guide. startSteps is the existing
+// "how to start a game" <ol> (data-testid="howto"), folded in as Getting started.
+function buildHowtoFull(host: HTMLElement, startSteps: HTMLElement): void {
+  const sec = (title: string, body: HTMLElement | string): void => {
+    host.append(el("h4", {}, title));
+    host.append(typeof body === "string" ? el("p", {}, body) : body);
+  };
+  sec("Objective",
+    "Destroy every generator and snipe while at least one player survives — or be the last " +
+    "player standing. If the 10-minute timer runs out, the highest score wins.");
+  const controls = el("div", {});
+  controls.append(
+    el("div", {}, "Classic (default): move with arrows, fire with W/A/S/D, turbo = Space."),
+    el("div", {}, "Modern: move with W/A/S/D, fire with arrows, turbo = Shift."),
+    el("div", {}, "Vi-keys h/j/k/l always move. Chat: T (Enter sends, Esc cancels). Fullscreen: F."),
+  );
+  sec("Controls", controls);
+  sec("Scoring", "Snipe +1 · Generator +10 · Player kill +25 · Your death −5.");
+  sec("Lives & respawn",
+    "Lives = 10 minus the level number (A1 = 9 lives, A9 = 1). Respawn takes 3s with 2s of spawn " +
+    "invulnerability. At 0 lives you become a spectator and can still chat.");
+  sec("Tips",
+    "Generators are high value and keep spawning snipes — clear them first. You can't fire while " +
+    "turboing. Higher letters (T–Z) are brutal: tougher generators, faster, smarter snipes.");
+  host.append(el("h4", {}, "Getting started"), startSteps);
 }
 
 // injectMatchStyles installs the in-match layout once: the match section fills
@@ -289,6 +379,7 @@ body { margin: 0; background: #07070b; }
 #lobby .x-btn:hover { color: var(--cyan); }
 #lobby .cheat { display: flex; gap: 16px; flex-wrap: wrap; align-items: center; font-size: 12px; color: #bcd2e8; }
 #lobby .key { color: #04121c; background: #9fd6f0; border-radius: 3px; padding: 0 5px; font-weight: 700; font-size: 11px; }
+#lobby .score-line { color: var(--text-dim); margin-left: auto; }
 #lobby [data-testid="howto-toggle"] { font-size: 10px; color: var(--cyan); background: transparent; border: 1px solid #2f6088; border-radius: 5px; padding: 1px 8px; letter-spacing: 1px; }
 #lobby [data-testid="howto-full"] { margin-top: 10px; font-size: 12px; line-height: 1.6; color: var(--text-dim); border-top: 1px solid var(--line-dim); padding-top: 9px; }
 #lobby [data-testid="howto-full"] h4 { margin: 10px 0 4px; color: #7fc6f0; font-size: 11px; letter-spacing: 1.5px; text-transform: uppercase; }
