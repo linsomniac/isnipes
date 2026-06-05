@@ -210,6 +210,23 @@ func (l *Lobby) Disconnect(sid SessionID) {
 	}
 }
 
+// MatchEnded notifies the lobby that a match has finished so its hosting room
+// is closed and removed from the listing (see handleMatchEnded). Posted by the
+// match registry's OnMatchEnded hook. Safe to drop on shutdown — a stopped
+// lobby has no rooms left to clean up. Like Disconnect (and unlike Touch),
+// there is no default: arm — room cleanup must not be silently dropped on
+// inbox backpressure; the send blocks until the actor accepts it or done is
+// closed.
+func (l *Lobby) MatchEnded(matchID string) {
+	if l.stopped.Load() {
+		return
+	}
+	select {
+	case l.in <- ctlMatchEnded{MatchID: matchID}:
+	case <-l.done:
+	}
+}
+
 // Touch refreshes a session's idle timer from a transport keepalive (WS
 // pong). Non-blocking and safe to drop: it's a liveness hint, not state.
 func (l *Lobby) Touch(sid SessionID) {
