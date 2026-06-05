@@ -30,6 +30,12 @@ type RegistryConfig struct {
 	// -1 on RemoveEnded. Owned by the registry (the goroutine that mutates
 	// the matches map), never polled. Nil-safe.
 	OnActiveMatchesDelta func(delta int)
+
+	// OnMatchEnded is invoked with the MatchID once a match's Run loop has
+	// returned (right after RemoveEnded). The lobby wires this to
+	// Lobby.MatchEnded so the hosting room is closed and removed. Called from
+	// the match Run goroutine; nil-safe.
+	OnMatchEnded func(matchID string)
 }
 
 // Registry is the lookup table of live matches. It is safe for
@@ -79,6 +85,9 @@ func (r *Registry) Create(mc MatchConfig) (*Match, error) {
 	go func() {
 		m.Run()
 		r.RemoveEnded(mc.MatchID)
+		if r.cfg.OnMatchEnded != nil {
+			r.cfg.OnMatchEnded(mc.MatchID)
+		}
 	}()
 	return m, nil
 }
