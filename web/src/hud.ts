@@ -38,6 +38,11 @@ export interface HudModel {
   // during the death→respawn fade, or null when not respawning. Set by
   // MatchRunner from the RespawnSequencer (web/src/death.ts).
   respawnCountdown: number | null;
+  // spectating: true while eliminated and free-/follow-panning the live match
+  // (spectator scroll). spectatorFollow is the followed player's nick in
+  // follow mode, or null in free-pan. Set by MatchRunner from SpectatorCamera.
+  spectating: boolean;
+  spectatorFollow: string | null;
 }
 
 export const CHAT_RING_CAP = 50;
@@ -48,6 +53,7 @@ export function emptyHudModel(): HudModel {
     rows: [], nickById: new Map(),
     showScoreboard: false, chat: [], deadCam: false, endDialog: null,
     respawnCountdown: null,
+    spectating: false, spectatorFollow: null,
   };
 }
 
