@@ -46,7 +46,7 @@ describe("RespawnSequencer", () => {
   test("stays idle while alive", () => {
     const s = new RespawnSequencer();
     const out = s.update(ALIVE(100, 200, 0));
-    expect(out).toEqual({ cameraOverride: null, redAlpha: 0, dimAlpha: 0, countdown: null });
+    expect(out).toEqual({ cameraOverride: null, redAlpha: 0, dimAlpha: 0, countdown: null, spectating: false });
   });
 
   test("on death, holds camera at the last self position with a red sting", () => {
@@ -68,11 +68,12 @@ describe("RespawnSequencer", () => {
     expect(out.countdown).toBeGreaterThanOrEqual(1);
   });
 
-  test("eliminated (lives 0): red sting only, no hold/dim/countdown", () => {
+  test("eliminated (lives 0): holds death spot, red sting, spectating, no dim/countdown", () => {
     const s = new RespawnSequencer();
     s.update(ALIVE(10, 20, 0, 0));
     const out = s.update(DEAD(1, 0));
-    expect(out.cameraOverride).toBeNull();
+    expect(out.cameraOverride).toEqual({ x: 10, y: 20 });
+    expect(out.spectating).toBe(true);
     expect(out.redAlpha).toBeGreaterThan(0);
     expect(out.dimAlpha).toBe(0);
     expect(out.countdown).toBeNull();
@@ -96,7 +97,7 @@ describe("RespawnSequencer", () => {
     s.update(ALIVE(10, 20, 0));
     s.update(DEAD(1));
     const out = s.update(DEAD(1 + SAFETY_MS + 1));
-    expect(out).toEqual({ cameraOverride: null, redAlpha: 0, dimAlpha: 0, countdown: null });
+    expect(out).toEqual({ cameraOverride: null, redAlpha: 0, dimAlpha: 0, countdown: null, spectating: false });
   });
 
   test("never enters dead without a prior self sighting", () => {
@@ -121,6 +122,17 @@ describe("RespawnSequencer", () => {
     s.update(ALIVE(10, 20, 0, 0));
     s.update(DEAD(1, 0));
     const out = s.update(ALIVE(10, 20, 2, 1));
-    expect(out).toEqual({ cameraOverride: null, redAlpha: 0, dimAlpha: 0, countdown: null });
+    expect(out).toEqual({ cameraOverride: null, redAlpha: 0, dimAlpha: 0, countdown: null, spectating: false });
+  });
+
+  test("spectating is false in the normal (non-eliminated) respawn flow", () => {
+    const s = new RespawnSequencer();
+    s.update(ALIVE(10, 20, 0));
+    const dead = s.update(DEAD(1)); // lives 3 → not eliminated
+    expect(dead.spectating).toBe(false);
+    const dim = s.update(DEAD(1 + HOLD_MS + 200));
+    expect(dim.spectating).toBe(false);
+    const fade = s.update(ALIVE(900, 900, 1 + RESPAWN_MS + 1)); // fade-in
+    expect(fade.spectating).toBe(false);
   });
 });

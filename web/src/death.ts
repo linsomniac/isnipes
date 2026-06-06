@@ -20,6 +20,10 @@ export interface DeathFxOutput {
   redAlpha: number; // 0..1
   dimAlpha: number; // 0..1
   countdown: number | null; // integer seconds, or null when not shown
+  // spectating: true only on the eliminated-dead branch (out of lives, match
+  // still running). browser.ts uses this to engage the SpectatorCamera and
+  // cameraOverride (= death spot) to seed it. See web/src/spectator.ts.
+  spectating: boolean;
 }
 
 // Timing (ms) / intensity (alpha) constants. Tunable.
@@ -56,7 +60,7 @@ export function respawnCountdown(elapsedMs: number): number | null {
 type Phase = "alive" | "dead" | "fadein";
 
 function idle(): DeathFxOutput {
-  return { cameraOverride: null, redAlpha: 0, dimAlpha: 0, countdown: null };
+  return { cameraOverride: null, redAlpha: 0, dimAlpha: 0, countdown: null, spectating: false };
 }
 
 // AIDEV-NOTE: RespawnSequencer is a pure state machine — no side effects.
@@ -93,10 +97,11 @@ export class RespawnSequencer {
         if (this.eliminated) {
           if (selfPresent) { this.phase = "alive"; return idle(); }
           return {
-            cameraOverride: null,
+            cameraOverride: { ...this.deathPos },
             redAlpha: redStingAlpha(nowMs - this.deathAtMs),
             dimAlpha: 0,
             countdown: null,
+            spectating: true,
           };
         }
         if (selfPresent) {
@@ -112,6 +117,7 @@ export class RespawnSequencer {
           redAlpha: redStingAlpha(elapsed),
           dimAlpha: dimRampAlpha(elapsed),
           countdown: respawnCountdown(elapsed),
+          spectating: false,
         };
       }
 
@@ -131,6 +137,7 @@ export class RespawnSequencer {
           redAlpha: 0,
           dimAlpha: DIM_MAX * (1 - t / FADEIN_MS),
           countdown: null,
+          spectating: false,
         };
       }
     }
