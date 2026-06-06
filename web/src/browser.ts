@@ -858,10 +858,19 @@ class MatchRunner {
     // living player. When not spectating, the camera/minimap behave as before.
     let cameraOverride = fx.cameraOverride;
     let minimapSelf: SelfPredicted | null = self;
-    if (fx.spectating) {
+    // Gate on !endDialog: once the match ends (MatchOver), the runner keeps
+    // looping until "Back to lobby", and the eliminated sequencer keeps
+    // reporting spectating=true. Without this gate the forced scoreboard +
+    // minimap + pan would leak on top of the end dialog. The else branch then
+    // holds the camera at the death spot and hides the spectator UI.
+    if (fx.spectating && !this.hud.endDialog) {
       const now = performance.now();
       if (!this.spectatorSeeded) {
-        this.spectator.start(fx.cameraOverride ?? { x: 0, y: 0 });
+        // fx.cameraOverride is the death spot (always non-null on the
+        // eliminated branch). The map-centre fallback only matters for the
+        // documented reconnect-while-dead case, which this version does not
+        // otherwise engage (the sequencer needs a prior self sighting).
+        this.spectator.start(fx.cameraOverride ?? { x: (this.maze.W * 256) / 2, y: (this.maze.H * 256) / 2 });
         this.spectatorSeeded = true;
         this.lastFrameMs = now;
       }

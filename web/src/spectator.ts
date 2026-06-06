@@ -75,6 +75,12 @@ export class SpectatorCamera {
     }
 
     // 2. A movement key releases follow back to free-pan in place.
+    // AIDEV-NOTE: ordering is cycle (step 1) then movement-release (step 2). A
+    // frame carrying BOTH a Tab edge and a held movement key nets to free —
+    // Tab only engages follow when no movement key is held. This is
+    // intentional: a "justCycled" guard would only buy a 1-frame follow
+    // flicker while the key stays held (next frame's still-held panDir releases
+    // anyway). Pinned by the "same-frame Tab + movement" test.
     if (panDir !== Dir.Idle && this.mode === "follow") {
       this.mode = "free";
       this.followId = null;

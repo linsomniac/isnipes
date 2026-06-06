@@ -118,6 +118,18 @@ describe("follow cycling", () => {
     expect(out.followId).toBeNull();
     expect(out.center).toEqual({ x: 7, y: 7 });
   });
+
+  test("a same-frame Tab + movement key nets to free (move-release wins)", () => {
+    const cam = new SpectatorCamera();
+    cam.start({ x: 0, y: 0 });
+    // cycleEdge engages follow (step 1), but the same-frame held movement key
+    // releases it back to free (step 2). Documented intentional ordering: Tab
+    // only engages follow when no movement key is held. dtMs:0 → no pan drift.
+    const out = cam.update(inp({ dtMs: 0, cycleEdge: true, panDir: Dir.E, players: [{ id: 1, x: 9, y: 9 }] }));
+    expect(out.mode).toBe("free");
+    expect(out.followId).toBeNull();
+    expect(out.center).toEqual({ x: 0, y: 0 });
+  });
 });
 
 describe("follow tracking", () => {
@@ -159,5 +171,15 @@ describe("follow tracking", () => {
     expect(out.mode).toBe("free");
     expect(out.followId).toBeNull();
     expect(out.center).toEqual({ x: 500, y: 500 });
+  });
+
+  test("a reappearing original target does not re-grab follow", () => {
+    const cam = new SpectatorCamera();
+    cam.start({ x: 0, y: 0 });
+    cam.update(inp({ cycleEdge: true, players: [{ id: 1, x: 10, y: 10 }, { id: 3, x: 30, y: 30 }] })); // follow id 1
+    cam.update(inp({ players: [{ id: 3, x: 35, y: 35 }] })); // id 1 gone → auto-advance to id 3
+    const out = cam.update(inp({ players: [{ id: 1, x: 12, y: 12 }, { id: 3, x: 40, y: 40 }] })); // id 1 back
+    expect(out.followId).toBe(3); // stays on the advanced-to target
+    expect(out.center).toEqual({ x: 40, y: 40 });
   });
 });

@@ -79,6 +79,17 @@ describe("RespawnSequencer", () => {
     expect(out.countdown).toBeNull();
   });
 
+  test("eliminated: holds death spot + spectating across later frames", () => {
+    const s = new RespawnSequencer();
+    s.update(ALIVE(10, 20, 0, 0));
+    s.update(DEAD(1, 0));
+    const later = s.update(DEAD(1 + RED_MS + 500, 0)); // a frame well after the sting
+    expect(later.cameraOverride).toEqual({ x: 10, y: 20 });
+    expect(later.spectating).toBe(true);
+    expect(later.redAlpha).toBe(0); // sting has decayed, hold/spectating persist
+    expect(later.dimAlpha).toBe(0);
+  });
+
   test("respawn → fade-in (camera follows marine, dim decays) → alive", () => {
     const s = new RespawnSequencer();
     s.update(ALIVE(10, 20, 0));
