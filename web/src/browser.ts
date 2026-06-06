@@ -17,7 +17,7 @@ import {
 import { selectPalette } from "./palette.js";
 import { mazeViewFromMapInit } from "./maze.js";
 import { Renderer, type RenderState, type SelfPredicted, type ResolvedOverlay } from "./render.js";
-import { EntityRegistry } from "./registry.js";
+import { EntityRegistry, EntityKind } from "./registry.js";
 import { OverlayManager, muzzleFrame, poofFrame } from "./anim.js";
 import { AudioEngine, WebAudioSink } from "./audio.js";
 import { InputController, PRESETS } from "./input.js";
@@ -28,6 +28,7 @@ import {
 } from "./hud.js";
 import { buildScene, isSceneName, type MatchScene, type LobbyScene } from "./scenes.js";
 import { RespawnSequencer } from "./death.js";
+import { SpectatorCamera } from "./spectator.js";
 
 const CLIENT_VERSION = "v0";
 // Logical render resolution = the fixed slice of maze always shown: at
@@ -91,6 +92,7 @@ interface UI {
   respawnOverlay: HTMLElement;
   connStatus: HTMLElement;
   lastMatch: HTMLElement;
+  spectatorBanner: HTMLElement;
 }
 
 function buildDOM(settings: Settings): UI {
@@ -215,8 +217,9 @@ function buildDOM(settings: Settings): UI {
   const backBtn = el("button", { "data-testid": "back-to-lobby" }, "Back to lobby") as HTMLButtonElement;
   const endDialog = el("div", { "data-testid": "end-dialog", hidden: "true" });
   const respawnOverlay = el("div", { "data-testid": "respawn-overlay", hidden: "true" });
+  const spectatorBanner = el("div", { "data-testid": "spectator-banner", hidden: "true" });
   const matchView = el("div", { "data-testid": "match-view" });
-  matchView.append(canvas, minimap, stats, scoreboard, chatBox, chatInput, endDialog, respawnOverlay);
+  matchView.append(canvas, minimap, stats, scoreboard, chatBox, chatInput, endDialog, respawnOverlay, spectatorBanner);
   const match = el("section", { id: "match", hidden: "true" });
   match.append(matchView);
 
@@ -227,6 +230,7 @@ function buildDOM(settings: Settings): UI {
     startBtn, startHint, roomList, picker, pickerPreview, serverInput, serverList, cbToggle,
     hcToggle, rfxToggle, volSlider, presetSelect, match, matchView, canvas, minimap, stats, scoreboard,
     chatBox, chatInput, endDialog, backBtn, status, respawnOverlay, connStatus, lastMatch,
+    spectatorBanner,
   };
   serverAddBtn.onclick = () => {
     const next = addServer(settings.servers, serverInput.value, location.protocol);
@@ -310,6 +314,7 @@ function injectMatchStyles(): void {
 #match [data-testid="chat-input"] { position: absolute; left: 8px; bottom: 8px; width: 44ch; }
 #match [data-testid="scoreboard"], #match [data-testid="end-dialog"] { position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); background: rgba(8, 12, 20, 0.92); color: #eaf2ff; padding: 16px 24px; border: 1px solid #2b3a55; border-radius: 6px; font: 14px/1.5 monospace; min-width: 240px; }
 #match [data-testid="respawn-overlay"] { position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); color: #ff5a5a; font: 700 28px/1.2 monospace; letter-spacing: 2px; text-shadow: 0 0 8px #000, 0 0 12px #000; pointer-events: none; }
+#match [data-testid="spectator-banner"] { position: absolute; left: 50%; bottom: 64px; transform: translateX(-50%); color: #8af0ff; font: 700 16px/1.3 monospace; letter-spacing: 1.5px; text-shadow: 0 0 8px #0b1a2a, 0 0 12px #0b1a2a; pointer-events: none; white-space: nowrap; }
 `;
   document.head.append(style);
 }
@@ -572,6 +577,16 @@ function renderHud(ui: UI, hud: HudModel): void {
   } else {
     ui.respawnOverlay.hidden = true;
   }
+  // Spectator banner: shown while spectating, hidden once the match ends
+  // (the end dialog takes over).
+  if (hud.spectating && !hud.endDialog) {
+    ui.spectatorBanner.hidden = false;
+    ui.spectatorBanner.textContent = hud.spectatorFollow
+      ? `SPECTATING — Following ${hud.spectatorFollow} · move: free look`
+      : "SPECTATING — move to look around · Tab: next player";
+  } else {
+    ui.spectatorBanner.hidden = true;
+  }
 }
 
 function drawMinimap(ui: UI, maze: { W: number; H: number }, self: SelfPredicted, entities: Entity[]): void {
@@ -613,6 +628,13 @@ class MatchRunner {
   private chatKeyHandler: ((e: KeyboardEvent) => void) | null = null;
   private respawn = new RespawnSequencer();
   private lastKnownSelfId = 0;
+  private spectator = new SpectatorCamera();
+  // spectatorSeeded latches the one-time SpectatorCamera.start() per death,
+  // reset when spectating ends. lastFrameMs feeds the pan dt. cyclePressed is
+  // the Tab edge captured by keydown, consumed once per frame.
+  private spectatorSeeded = false;
+  private lastFrameMs = 0;
+  private cyclePressed = false;
 
   constructor(ui: UI, settings: Settings, lobbyOrigin: string, onEnd: () => void) {
     this.ui = ui;
@@ -719,7 +741,14 @@ class MatchRunner {
     // "f" toggles fullscreen (handled here, before input, so it isn't also
     // captured as a held key).
     if (e.code === "KeyF") { e.preventDefault(); toggleFullscreen(); return; }
-    if (e.code === "Tab") { e.preventDefault(); this.hud.showScoreboard = true; return; }
+    if (e.code === "Tab") {
+      e.preventDefault();
+      // While spectating the scoreboard is always shown, so Tab cycles the
+      // followed player instead of toggling it.
+      if (this.hud.spectating) this.cyclePressed = true;
+      else this.hud.showScoreboard = true;
+      return;
+    }
     if (e.code === this.input.getBindings().chatOpen) {
       e.preventDefault();
       this.ui.chatInput.hidden = false;
@@ -794,6 +823,14 @@ class MatchRunner {
     this.renderer.setRetroFx(on);
   }
 
+  // consumeCycle returns the pending Tab cycle edge and clears it, so each
+  // press advances the followed player exactly once.
+  private consumeCycle(): boolean {
+    const c = this.cyclePressed;
+    this.cyclePressed = false;
+    return c;
+  }
+
   private drawFrame(): void {
     const latest = this.latest;
     if (!latest || !this.maze) { renderHud(this.ui, this.hud); return; }
@@ -815,17 +852,67 @@ class MatchRunner {
       nowMs: performance.now(),
     });
 
+    // Spectator camera: engaged only while eliminated and the match is still
+    // running (fx.spectating). fx.cameraOverride holds the death spot, which
+    // seeds the free-pan; from there the movement keys pan and Tab follows a
+    // living player. When not spectating, the camera/minimap behave as before.
+    let cameraOverride = fx.cameraOverride;
+    let minimapSelf: SelfPredicted | null = self;
+    // Gate on !endDialog: once the match ends (MatchOver), the runner keeps
+    // looping until "Back to lobby", and the eliminated sequencer keeps
+    // reporting spectating=true. Without this gate the forced scoreboard +
+    // minimap + pan would leak on top of the end dialog. The else branch then
+    // holds the camera at the death spot and hides the spectator UI.
+    if (fx.spectating && !this.hud.endDialog) {
+      const now = performance.now();
+      if (!this.spectatorSeeded) {
+        // fx.cameraOverride is the death spot (always non-null on the
+        // eliminated branch). The map-centre fallback only matters for the
+        // documented reconnect-while-dead case, which this version does not
+        // otherwise engage (the sequencer needs a prior self sighting).
+        this.spectator.start(fx.cameraOverride ?? { x: (this.maze.W * 256) / 2, y: (this.maze.H * 256) / 2 });
+        this.spectatorSeeded = true;
+        this.lastFrameMs = now;
+      }
+      const dt = now - this.lastFrameMs;
+      this.lastFrameMs = now;
+      const intent = this.input.intent();
+      const players = latest.entities
+        .filter((e) => e.kind === EntityKind.Player)
+        .map((e) => ({ id: e.id, x: e.x, y: e.y }));
+      const out = this.spectator.update({
+        dtMs: dt,
+        panDir: intent.dir,
+        turbo: intent.turbo,
+        cycleEdge: this.consumeCycle(),
+        players,
+        bounds: { worldW: this.maze.W * 256, worldH: this.maze.H * 256 },
+      });
+      cameraOverride = out.center;
+      minimapSelf = { x: out.center.x, y: out.center.y, facing: 0, flags: 0 };
+      this.hud.spectating = true;
+      this.hud.spectatorFollow =
+        out.mode === "follow" && out.followId !== null
+          ? (this.hud.nickById.get(out.followId) ?? "…")
+          : null;
+      this.hud.showScoreboard = true; // standings stay visible while watching
+    } else {
+      this.spectatorSeeded = false;
+      this.hud.spectating = false;
+      this.hud.spectatorFollow = null;
+    }
+
     this.renderer.draw(
       {
         map: this.mazeViewCache, selfId: latest.yourEntityID, selfPredicted: self,
         entities: others, renderTick: this.renderTick,
         overlays: this.resolveOverlays(),
-        cameraOverride: fx.cameraOverride,
+        cameraOverride,
         deathFx: { redAlpha: fx.redAlpha, dimAlpha: fx.dimAlpha },
       },
       this.hud,
     );
-    if (self) drawMinimap(this.ui, this.maze, self, others);
+    if (minimapSelf) drawMinimap(this.ui, this.maze, minimapSelf, others);
     // Test-gated self-position hook so the live e2e (#27) can assert
     // server-authoritative movement. Prod never sets __ISNIPES_TEST__.
     if (self && testMode()) {
