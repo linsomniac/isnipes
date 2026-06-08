@@ -40,7 +40,7 @@ import (
 	"github.com/jafo/isnipes/internal/observ"
 )
 
-const version = "v1.0.0"
+const version = "v1.0.1"
 
 func main() {
 	var (
