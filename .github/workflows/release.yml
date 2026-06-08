@@ -1,0 +1,50 @@
+name: release
+
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.release.tag_name }}
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version: '1.26'
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '20'
+
+      - name: Build embedded web client
+        run: |
+          npm -C web ci
+          npm -C web run build
+          rm -rf cmd/isnipes/dist
+          mkdir -p cmd/isnipes/dist
+          cp -r web/dist/. cmd/isnipes/dist/
+
+      - name: Build Linux and Windows binaries
+        run: |
+          mkdir -p release
+          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build \
+            -tags embed -trimpath -ldflags "-s -w" \
+            -o release/isnipes-linux-amd64 ./cmd/isnipes
+          CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build \
+            -tags embed -trimpath -ldflags "-s -w" \
+            -o release/isnipes-windows-amd64.exe ./cmd/isnipes
+          cd release
+          sha256sum isnipes-linux-amd64 isnipes-windows-amd64.exe > SHA256SUMS
+
+      - name: Upload release binaries
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+        run: gh release upload "$RELEASE_TAG" release/* --clobber
